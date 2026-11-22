@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="DateCalc/DateCalc.csproj" />
+  <Project Path="DateCalc.Tests/DateCalc.Tests.csproj" />
+</Solution>

@@ -183,6 +183,13 @@ DB 等から独自に読み込む場合は `WorkCalendarDefinition` を生成し
 ```powershell
 dotnet build src/DateCalc.slnx -c Release
 dotnet test src/DateCalc.slnx -c Release --no-build --verbosity normal
+
+# NuGet パッケージ (.nupkg) の生成
+dotnet pack src/DateCalc.slnx -c Release -o artifacts/nupkg
+
+# 別プロジェクトからのローカルフィード利用例
+dotnet nuget add source <リポジトリパス>\artifacts\nupkg --name DateCalcLocal
+dotnet add package DateCalc --version 0.1.0
 ```
 
 ---

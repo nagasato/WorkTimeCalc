@@ -1,8 +1,8 @@
-# DateCalc — 稼働日・稼働時間算出ライブラリ 設計・実装計画
+# WorkTimeCalc — 稼働日・稼働時間算出ライブラリ 設計・実装計画
 
 ## 1. ゴールと設計方針
 
-C# / .NET 向けに、**ネットワーク非依存（完全オフライン）** で動作する稼働日・実稼働時間算出ライブラリ `DateCalc` を構築します。
+C# / .NET 向けの稼働日・実稼働時間算出ライブラリ `WorkTimeCalc` を構築します。
 
 ### 主な要件
 - **マルチターゲット (`net8.0;netstandard2.0`)**:
@@ -10,7 +10,7 @@ C# / .NET 向けに、**ネットワーク非依存（完全オフライン）**
   - `.NET Standard 2.0`: `.NET Framework 4.8` 等からも `DateTime` / `TimeSpan` ベースで同一機能を利用可能（公式 `System.Text.Json 8.0.5` のみ参照）
 - **稼働時間・複数休憩・日跨ぎ稼働（夜勤）**:
   - `08:00-17:00`（休憩 `12:00-13:00`, `15:00-15:10`）のような日勤だけでなく、`22:00-翌06:00`（休憩 `02:00-03:00` や `23:30-00:30`）のような日跨ぎシフトや 24 時間稼働を正確に算出
-- **完全オフラインの日本祝日判定＋外部データ差し替え**:
+- **日本の祝日判定＋外部データ差し替え**:
   - 「国民の祝日に関する法律」に基づく計算エンジン（固定祝日・ハッピーマンデー・春分/秋分日近似式・振替休日・国民の休日・歴史的特例）を内蔵
   - 将来の法改正等に備え、内閣府 `syukujitsu.csv` やメモリ/DBデータへの差し替え・年範囲フォールバック合成に対応
 - **柔軟な特例上書き**:
@@ -78,7 +78,7 @@ flowchart TD
         DTI["DateTimeInterval"]
     end
 
-    subgraph Holidays["Offline Holiday Providers (IHolidayProvider)"]
+    subgraph Holidays["Holiday Providers (IHolidayProvider)"]
         JHP["JapanHolidayProvider\n(Statutory Rules + Year Cache)"]
         CSV["CabinetOfficeCsvHolidayProvider\n(syukujitsu.csv local reader)"]
         MEM["InMemoryHolidayProvider"]
@@ -117,13 +117,13 @@ flowchart TD
 ## 4. ディレクトリ構成
 
 ```text
-f:\Dev\source2\DateCalc\
+WorkTimeCalc\
 ├── docs\
 │   └── implementation-plan.md
 └── src\
-    ├── DateCalc.slnx
-    ├── DateCalc\
-    │   ├── DateCalc.csproj                  (net8.0;netstandard2.0)
+    ├── WorkTimeCalc.slnx
+    ├── WorkTimeCalc\
+    │   ├── WorkTimeCalc.csproj              (net8.0;netstandard2.0)
     │   ├── Polyfills\
     │   │   └── IsExternalInit.cs
     │   ├── Internal\
@@ -151,8 +151,8 @@ f:\Dev\source2\DateCalc\
     │   ├── WorkCalendarBuilder.cs
     │   ├── IWorkCalendarProvider.cs
     │   └── WorkCalendarRegistry.cs
-    └── DateCalc.Tests\
-        ├── DateCalc.Tests.csproj            (net8.0 + xUnit)
+    └── WorkTimeCalc.Tests\
+        ├── WorkTimeCalc.Tests.csproj        (net8.0 + xUnit)
         ├── JapanHolidayProviderTests.cs
         ├── HolidayProviderCompositionTests.cs
         ├── DailyWorkScheduleTests.cs
@@ -218,7 +218,7 @@ var calendar = WorkCalendar.CreateBuilder()
 
 ```powershell
 $env:DOTNET_CLI_TELEMETRY_OPTOUT = "1"
-dotnet restore src/DateCalc.slnx --source "$env:USERPROFILE\.nuget\packages"
-dotnet build src/DateCalc.slnx -c Release --no-restore
-dotnet test src/DateCalc.slnx -c Release --no-build --verbosity normal
+dotnet restore src/WorkTimeCalc.slnx --source "$env:USERPROFILE\.nuget\packages"
+dotnet build src/WorkTimeCalc.slnx -c Release --no-restore
+dotnet test src/WorkTimeCalc.slnx -c Release --no-build --verbosity normal
 ```

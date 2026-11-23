@@ -1,6 +1,6 @@
-# DateCalc
+# WorkTimeCalc
 
-C# / .NET 向けの、**ネットワーク非依存（完全オフライン）** で動作する稼働日・実稼働時間算出ライブラリです。
+C# / .NET 向けの稼働日・実稼働時間算出ライブラリです。
 
 日勤・複数休憩・日跨ぎ稼働（夜勤）・日本の国民の祝日（法定計算＋ローカル CSV 差し替え）・休日出勤／特別休業の特例上書き・複数カレンダー管理・JSON／DB 連携に対応しています。
 
@@ -8,7 +8,7 @@ C# / .NET 向けの、**ネットワーク非依存（完全オフライン）**
 
 ## 主な特徴
 
-- **完全オフラインの日本祝日判定**: 「国民の祝日に関する法律」に基づく計算エンジン（`JapanHolidayProvider`）を内蔵し、ネットワーク接続なしで春分・秋分の日、ハッピーマンデー、振替休日、国民の休日、過去の特例祝日を判定
+- **日本の祝日判定を内蔵**: 「国民の祝日に関する法律」に基づく計算エンジン（`JapanHolidayProvider`）を内蔵し、春分・秋分の日、ハッピーマンデー、振替休日、国民の休日、過去の特例祝日を判定
 - **外部データ差し替え対応**: 内閣府 `syukujitsu.csv` 形式のローカルファイル読込（`CabinetOfficeCsvHolidayProvider`）や、CSV 収録年を優先しつつ未来年は内蔵計算へフォールバックする合成（`CompositeHolidayProvider.WithYearRangeFallback`）に対応
 - **複数休憩・日跨ぎシフト（夜勤）対応**: `08:00-17:00`（休憩 `12:00-13:00`, `15:00-15:10`）のような日勤だけでなく、`22:00-06:00`（`22:00-30:00` 表記、深夜休憩 `02:00-03:00` や日跨ぎ休憩 `23:30-00:30`、24 時間連続稼働）を正確に算出
 - **柔軟な特例上書き**: 休日出勤・祝日稼働（非稼働日→稼働日）、夏季休暇・臨時休業・毎年固定の年末年始（稼働日→非稼働日）を明確な優先順位で制御
@@ -25,8 +25,8 @@ C# / .NET 向けの、**ネットワーク非依存（完全オフライン）**
 
 ```csharp
 using System;
-using DateCalc;
-using DateCalc.Models;
+using WorkTimeCalc;
+using WorkTimeCalc.Models;
 
 WorkCalendar calendar = WorkCalendar.CreateBuilder()
     .WithId("factory-a-day")
@@ -85,12 +85,12 @@ var intervals = nightShift.GetWorkingIntervals(
 
 ---
 
-### 3. オフライン祝日データの差し替え・合成
+### 3. 祝日データの差し替え・合成
 
 法改正等で最新の内閣府 `syukujitsu.csv` をローカルに配布し、収録年はその CSV を、未収録の将来年は内蔵計算エンジンへフォールバックさせる構成が可能です。
 
 ```csharp
-using DateCalc.Holidays;
+using WorkTimeCalc.Holidays;
 
 CabinetOfficeCsvHolidayProvider csvProvider =
     CabinetOfficeCsvHolidayProvider.FromFile("syukujitsu.csv");
@@ -138,8 +138,8 @@ var calendar = WorkCalendar.CreateBuilder()
 ```
 
 ```csharp
-using DateCalc;
-using DateCalc.Serialization;
+using WorkTimeCalc;
+using WorkTimeCalc.Serialization;
 
 IWorkCalendarProvider registry = WorkCalendarSerializer.LoadRegistryFromJson(jsonArray);
 IWorkCalendar dayCalendar = registry.GetCalendar("factory-day");
@@ -175,21 +175,21 @@ DB 等から独自に読み込む場合は `WorkCalendarDefinition` を生成し
 ├── docs/
 │   └── implementation-plan.md   # 設計・実装計画ドキュメント
 └── src/
-    ├── DateCalc.slnx            # ソリューションファイル (.slnx)
-    ├── DateCalc/                # ライブラリ本体 (net8.0;netstandard2.0)
-    └── DateCalc.Tests/          # xUnit 単体テスト (net8.0)
+    ├── WorkTimeCalc.slnx        # ソリューションファイル (.slnx)
+    ├── WorkTimeCalc/            # ライブラリ本体 (net8.0;netstandard2.0)
+    └── WorkTimeCalc.Tests/      # xUnit 単体テスト (net8.0)
 ```
 
 ```powershell
-dotnet build src/DateCalc.slnx -c Release
-dotnet test src/DateCalc.slnx -c Release --no-build --verbosity normal
+dotnet build src/WorkTimeCalc.slnx -c Release
+dotnet test src/WorkTimeCalc.slnx -c Release --no-build --verbosity normal
 
 # NuGet パッケージ (.nupkg) の生成
-dotnet pack src/DateCalc.slnx -c Release -o artifacts/nupkg
+dotnet pack src/WorkTimeCalc.slnx -c Release -o artifacts/nupkg
 
 # 別プロジェクトからのローカルフィード利用例
-dotnet nuget add source <リポジトリパス>\artifacts\nupkg --name DateCalcLocal
-dotnet add package DateCalc --version 0.1.0
+dotnet nuget add source <リポジトリパス>\artifacts\nupkg --name WorkTimeCalcLocal
+dotnet add package WorkTimeCalc --version 0.1.0
 ```
 
 ---

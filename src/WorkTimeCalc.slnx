@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="WorkTimeCalc/WorkTimeCalc.csproj" />
+  <Project Path="WorkTimeCalc.Tests/WorkTimeCalc.Tests.csproj" />
+</Solution>

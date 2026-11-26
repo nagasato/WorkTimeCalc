@@ -222,3 +222,19 @@ dotnet restore src/WorkTimeCalc.slnx --source "$env:USERPROFILE\.nuget\packages"
 dotnet build src/WorkTimeCalc.slnx -c Release --no-restore
 dotnet test src/WorkTimeCalc.slnx -c Release --no-build --verbosity normal
 ```
+
+---
+
+## 8. 残業計算拡張（OvertimePolicy / WorkingTimeBreakdown / OvertimePeriods）
+
+稼働日判定・稼働日計算は定時ベース（`IsWorkingDay` 等は変更なし）のまま、以下の 2 方式を残業ポリシー `OvertimePolicy` で統一的に扱えるよう拡張しています。
+
+1. **呼び出し時の動的残業（定時のみカレンダーでも利用可能）**:
+   - `OvertimePolicy.MaxPerDay(TimeSpan)`: 各稼働日の定時終了後に指定時間まで残業を動的延長（`DailyWorkSchedule.Breaks` を自動控除）。上限超過分は翌稼働日へ繰り越し。
+   - `OvertimePolicy.Unlimited`: 1 日の上限なしで定時終了後へそのまま延長（`Breaks` は継続適用、非稼働日・始業前開始時は次の定時開始時刻へスナップしてから延長）。
+2. **カレンダー事前定義の残業枠（`DailyWorkSchedule.OvertimePeriods`）**:
+   - `WorkCalendarBuilder.WithOvertimeHours` / `AddOvertimeHours` / `AddOvertimePeriod` および `WorkCalendarDefinition.OvertimePeriods`（JSON）で事前定義。
+   - `OvertimePolicy.CalendarDefined` 指定時に定時＋残業枠で計算し、`IsOvertime(DateTime)` で事前定義残業帯を判定可能。
+3. **既存 API の完全後方互換と内訳取得**:
+   - 既存メソッド（`OvertimePolicy` 省略時）は既定で `OvertimePolicy.None`（定時のみ）を維持。
+   - `GetWorkingTimeBreakdown(start, end, [overtimePolicy])` により `WorkingTimeBreakdown`（`Regular` / `Overtime` / `Total`）を取得可能。

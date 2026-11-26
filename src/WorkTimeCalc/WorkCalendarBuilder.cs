@@ -13,6 +13,7 @@ namespace WorkTimeCalc
     {
         private readonly List<WorkTimeRange> _workingPeriods = new List<WorkTimeRange>();
         private readonly List<WorkTimeRange> _breaks = new List<WorkTimeRange>();
+        private readonly List<WorkTimeRange> _overtimePeriods = new List<WorkTimeRange>();
         private readonly HashSet<DayOfWeek> _nonWorkingDaysOfWeek = new HashSet<DayOfWeek>
         {
             DayOfWeek.Saturday,
@@ -27,6 +28,7 @@ namespace WorkTimeCalc
         private DailyWorkSchedule? _explicitSchedule;
         private IHolidayProvider _baseHolidayProvider = JapanHolidayProvider.Instance;
         private bool _useJapanHolidays = true;
+        private bool _breaksCleared;
 
         /// <summary>
         /// カレンダー識別子を設定します。
@@ -62,6 +64,8 @@ namespace WorkTimeCalc
             _explicitSchedule = schedule ?? throw new ArgumentNullException(nameof(schedule));
             _workingPeriods.Clear();
             _breaks.Clear();
+            _overtimePeriods.Clear();
+            _breaksCleared = false;
             return this;
         }
 
@@ -114,6 +118,7 @@ namespace WorkTimeCalc
         public WorkCalendarBuilder AddBreak(TimeSpan start, TimeSpan end)
         {
             _explicitSchedule = null;
+            _breaksCleared = false;
             _breaks.Add(WorkTimeRange.FromClock(start, end));
             return this;
         }
@@ -126,6 +131,7 @@ namespace WorkTimeCalc
         public WorkCalendarBuilder AddBreak(WorkTimeRange breakRange)
         {
             _explicitSchedule = null;
+            _breaksCleared = false;
             _breaks.Add(breakRange);
             return this;
         }
@@ -138,6 +144,58 @@ namespace WorkTimeCalc
         {
             _explicitSchedule = null;
             _breaks.Clear();
+            _breaksCleared = true;
+            return this;
+        }
+
+        /// <summary>
+        /// 既存の事前定義残業時間帯を置き換えて、1 つの残業時間帯を設定します。
+        /// 終了時刻が開始時刻より小さい場合は自動的に日跨ぎとして解釈されます。
+        /// </summary>
+        /// <param name="start">残業開始時刻。</param>
+        /// <param name="end">残業終了時刻。</param>
+        /// <returns>このビルダーインスタンス。</returns>
+        public WorkCalendarBuilder WithOvertimeHours(TimeSpan start, TimeSpan end)
+        {
+            _explicitSchedule = null;
+            _overtimePeriods.Clear();
+            _overtimePeriods.Add(WorkTimeRange.FromClock(start, end));
+            return this;
+        }
+
+        /// <summary>
+        /// 既存の残業時間帯を保持したまま、事前定義の残業時間帯を追加します。
+        /// </summary>
+        /// <param name="start">残業開始時刻。</param>
+        /// <param name="end">残業終了時刻。</param>
+        /// <returns>このビルダーインスタンス。</returns>
+        public WorkCalendarBuilder AddOvertimeHours(TimeSpan start, TimeSpan end)
+        {
+            _explicitSchedule = null;
+            _overtimePeriods.Add(WorkTimeRange.FromClock(start, end));
+            return this;
+        }
+
+        /// <summary>
+        /// 事前定義の残業時間帯を追加します。
+        /// </summary>
+        /// <param name="period">残業時間帯。</param>
+        /// <returns>このビルダーインスタンス。</returns>
+        public WorkCalendarBuilder AddOvertimePeriod(WorkTimeRange period)
+        {
+            _explicitSchedule = null;
+            _overtimePeriods.Add(period);
+            return this;
+        }
+
+        /// <summary>
+        /// 登録されている事前定義の残業時間帯をすべてクリアします。
+        /// </summary>
+        /// <returns>このビルダーインスタンス。</returns>
+        public WorkCalendarBuilder ClearOvertime()
+        {
+            _explicitSchedule = null;
+            _overtimePeriods.Clear();
             return this;
         }
 
@@ -324,6 +382,22 @@ namespace WorkTimeCalc
         }
 
         /// <summary>
+        /// 既存の事前定義残業時間帯を置き換えて、<see cref="TimeOnly"/> で残業時間帯を設定します。
+        /// </summary>
+        public WorkCalendarBuilder WithOvertimeHours(TimeOnly start, TimeOnly end)
+        {
+            return WithOvertimeHours(start.ToTimeSpan(), end.ToTimeSpan());
+        }
+
+        /// <summary>
+        /// <see cref="TimeOnly"/> で事前定義の残業時間帯を追加します。
+        /// </summary>
+        public WorkCalendarBuilder AddOvertimeHours(TimeOnly start, TimeOnly end)
+        {
+            return AddOvertimeHours(start.ToTimeSpan(), end.ToTimeSpan());
+        }
+
+        /// <summary>
         /// <see cref="DateOnly"/> で独自の祝日を追加します。
         /// </summary>
         public WorkCalendarBuilder AddCustomHoliday(DateOnly date, string name)
@@ -359,7 +433,7 @@ namespace WorkTimeCalc
             {
                 schedule = _explicitSchedule;
             }
-            else if (_workingPeriods.Count == 0 && _breaks.Count == 0)
+            else if (_workingPeriods.Count == 0 && _breaks.Count == 0 && _overtimePeriods.Count == 0 && !_breaksCleared)
             {
                 schedule = DailyWorkSchedule.StandardDayShift;
             }
@@ -369,7 +443,11 @@ namespace WorkTimeCalc
                     ? _workingPeriods
                     : new List<WorkTimeRange> { new WorkTimeRange(TimeSpan.FromHours(8), TimeSpan.FromHours(17)) };
 
-                schedule = new DailyWorkSchedule(periods, _breaks);
+                List<WorkTimeRange> breaks = (_workingPeriods.Count == 0 && _breaks.Count == 0 && !_breaksCleared)
+                    ? new List<WorkTimeRange> { new WorkTimeRange(TimeSpan.FromHours(12), TimeSpan.FromHours(13)) }
+                    : _breaks;
+
+                schedule = new DailyWorkSchedule(periods, breaks, _overtimePeriods);
             }
 
             IHolidayProvider holidayProvider = _baseHolidayProvider;

@@ -11,6 +11,7 @@ C# / .NET 向けの稼働日・実稼働時間算出ライブラリです。
 - **日本の祝日判定を内蔵**: 「国民の祝日に関する法律」に基づく計算エンジン（`JapanHolidayProvider`）を内蔵し、春分・秋分の日、ハッピーマンデー、振替休日、国民の休日、過去の特例祝日を判定
 - **外部データ差し替え対応**: 内閣府 `syukujitsu.csv` 形式のローカルファイル読込（`CabinetOfficeCsvHolidayProvider`）や、CSV 収録年を優先しつつ未来年は内蔵計算へフォールバックする合成（`CompositeHolidayProvider.WithYearRangeFallback`）に対応
 - **複数休憩・日跨ぎシフト（夜勤）対応**: `08:00-17:00`（休憩 `12:00-13:00`, `15:00-15:10`）のような日勤だけでなく、`22:00-06:00`（`22:00-30:00` 表記、深夜休憩 `02:00-03:00` や日跨ぎ休憩 `23:30-00:30`、24 時間連続稼働）を正確に算出
+- **残業計算対応（動的延長＋事前定義）**: 稼働日カウントは定時ベースのまま、呼び出し時の `OvertimePolicy`（1 日残業上限 `MaxPerDay` / 上限なし `Unlimited` / カレンダー事前定義 `CalendarDefined`）による完了日時算出・逆算・実働内訳（`GetWorkingTimeBreakdown`）に対応
 - **柔軟な特例上書き**: 休日出勤・祝日稼働（非稼働日→稼働日）、夏季休暇・臨時休業・毎年固定の年末年始（稼働日→非稼働日）を明確な優先順位で制御
 - **マルチターゲット (`net8.0;netstandard2.0`)**:
   - `.NET 8.0+`: 外部 NuGet 依存ゼロ、`DateOnly` / `TimeOnly` オーバーロードを利用可能
@@ -61,7 +62,50 @@ DateOnly nextWork = calendar.GetNextWorkingDay(new DateOnly(2026, 5, 5));
 
 ---
 
-### 2. 日跨ぎ稼働（夜勤）
+### 2. 残業を含む稼働時間算出（動的延長／事前定義／内訳）
+
+稼働日カウント（`IsWorkingDay` / `AddWorkingDays` / `CountWorkingDays`）は定時ベースのまま、時間計算メソッドに `OvertimePolicy` を渡すことで残業を含めた完了日時や内訳を算出できます。
+
+#### A. 定時カレンダーのまま「10H 働いたら何時終わりか」を算出（動的残業）
+
+```csharp
+WorkCalendar calendar = WorkCalendar.CreateDefault(); // 08:00-17:00, 昼休憩 12:00-13:00（実働 8H）
+var start = new DateTime(2026, 5, 11, 8, 0, 0);
+
+// 既定（定時のみ）→ 翌日 10:00
+DateTime regularEnd = calendar.AddWorkingTime(start, TimeSpan.FromHours(10));
+
+// 1日の残業上限 2H まで許容して 10H 働く → 当日 19:00（11H なら翌日 09:00 へ繰越）
+DateTime max2hEnd = calendar.AddWorkingTime(
+    start,
+    TimeSpan.FromHours(10),
+    OvertimePolicy.MaxPerDay(TimeSpan.FromHours(2)));
+
+// 上限なしで当日そのまま 10H 働く → 当日 19:00（15H なら翌日 00:00。休憩は自動控除）
+DateTime unlimitedEnd = calendar.AddWorkingTime(start, TimeSpan.FromHours(10), OvertimePolicy.Unlimited);
+
+// 実働時間（08:00〜19:00）を定時・残業に分解 → Regular: 8h, Overtime: 2h, Total: 10h
+WorkingTimeBreakdown breakdown = calendar.GetWorkingTimeBreakdown(start, unlimitedEnd, OvertimePolicy.Unlimited);
+```
+
+#### B. カレンダーに残業前休憩・残業時間帯を事前定義する場合
+
+```csharp
+WorkCalendar otCalendar = WorkCalendar.CreateBuilder()
+    .WithWorkingHours(TimeSpan.FromHours(8), TimeSpan.FromHours(17))
+    .AddBreak(TimeSpan.FromHours(12), TimeSpan.FromHours(13))
+    .AddBreak(new TimeSpan(17, 0, 0), new TimeSpan(17, 15, 0)) // 残業前休憩 15分（動的残業にも適用）
+    .AddOvertimeHours(new TimeSpan(17, 0, 0), new TimeSpan(19, 15, 0))
+    .Build();
+
+DateTime finish = otCalendar.AddWorkingTime(start, TimeSpan.FromHours(10), OvertimePolicy.CalendarDefined); // 19:15
+bool isOt = otCalendar.IsOvertime(new DateTime(2026, 5, 11, 18, 0, 0)); // true
+WorkingTimeBreakdown definedBreakdown = otCalendar.GetWorkingTimeBreakdown(start, finish);
+```
+
+---
+
+### 3. 日跨ぎ稼働（夜勤）
 
 夜勤シフトでは**始業日**を稼働日として扱います。たとえば「金曜稼働・土曜非稼働」で `22:00-06:00` シフトの場合、金曜始業の稼働は金曜 `22:00` 〜 土曜 `06:00` となります。
 
@@ -85,7 +129,7 @@ var intervals = nightShift.GetWorkingIntervals(
 
 ---
 
-### 3. 祝日データの差し替え・合成
+### 4. 祝日データの差し替え・合成
 
 法改正等で最新の内閣府 `syukujitsu.csv` をローカルに配布し、収録年はその CSV を、未収録の将来年は内蔵計算エンジンへフォールバックさせる構成が可能です。
 
@@ -109,7 +153,7 @@ var calendar = WorkCalendar.CreateBuilder()
 
 ---
 
-### 4. JSON 設定からの複数カレンダー管理
+### 5. JSON 設定からの複数カレンダー管理
 
 ```json
 [

@@ -344,5 +344,181 @@ namespace WorkTimeCalc.Tests
             string plainJson = WorkCalendarSerializer.Serialize(plain);
             Assert.DoesNotContain("overtimePeriods", plainJson);
         }
+
+        [Fact]
+        public void NightShift_BreakNormalizationForRegular_IsUnaffectedByEarlyOvertime()
+        {
+            // PR指摘#2: 定時 22:00-30:00・休憩 02:00-03:00 に始業日側残業 02:00-04:00 を追加しても
+            // 定時の実働は 7h（22:00-26:00, 27:00-30:00）のまま変わらず、残業は 03:00-04:00（1h）となること
+            var schedule = new DailyWorkSchedule(
+                new[] { WorkTimeRange.Parse("22:00-30:00") },
+                new[] { WorkTimeRange.Parse("02:00-03:00") },
+                new[] { WorkTimeRange.Parse("02:00-04:00") });
+
+            Assert.Equal(TimeSpan.FromHours(7), schedule.TotalWorkingDuration);
+            Assert.Equal(2, schedule.EffectiveWorkingRanges.Count);
+            Assert.Equal(WorkTimeRange.Parse("22:00-26:00"), schedule.EffectiveWorkingRanges[0]);
+            Assert.Equal(WorkTimeRange.Parse("27:00-30:00"), schedule.EffectiveWorkingRanges[1]);
+
+            Assert.Equal(TimeSpan.FromHours(1), schedule.TotalOvertimeDuration);
+            Assert.Single(schedule.EffectiveOvertimeRanges);
+            Assert.Equal(WorkTimeRange.Parse("03:00-04:00"), schedule.EffectiveOvertimeRanges[0]);
+        }
+
+        [Fact]
+        public void OvertimePolicy_Unlimited_PreservesSplitRegularGapsAndIgnoresNextDayBreaksInsideRegular()
+        {
+            // PR指摘#3a: 休憩なしの分割定時 [08:00-12:00), [13:00-17:00) では昼ギャップ 12:00-13:00 が維持されること
+            WorkCalendar splitCal = WorkCalendar.CreateBuilder()
+                .WithWorkingHours(TimeSpan.FromHours(8), TimeSpan.FromHours(12))
+                .AddWorkingHours(TimeSpan.FromHours(13), TimeSpan.FromHours(17))
+                .Build();
+
+            var monStart = new DateTime(2026, 5, 11, 8, 0, 0);
+            Assert.Equal(new DateTime(2026, 5, 11, 17, 0, 0), splitCal.AddWorkingTime(monStart, TimeSpan.FromHours(8), OvertimePolicy.Unlimited));
+            DateTime end10h = splitCal.AddWorkingTime(monStart, TimeSpan.FromHours(10), OvertimePolicy.Unlimited);
+            Assert.Equal(new DateTime(2026, 5, 11, 19, 0, 0), end10h);
+            Assert.Equal(monStart, splitCal.SubtractWorkingTime(end10h, TimeSpan.FromHours(10), OvertimePolicy.Unlimited));
+
+            WorkingTimeBreakdown splitBreakdown = splitCal.GetWorkingTimeBreakdown(monStart, new DateTime(2026, 5, 11, 17, 0, 0), OvertimePolicy.Unlimited);
+            Assert.Equal(TimeSpan.FromHours(8), splitBreakdown.Regular);
+            Assert.Equal(TimeSpan.Zero, splitBreakdown.Overtime);
+            Assert.Equal(TimeSpan.FromHours(8), splitBreakdown.Total);
+
+            // PR指摘#3b: 定時 08:00-17:00 + 翌日休憩 36:00-37:00 では当日定時（9h）が削られず残業が負にならないこと
+            WorkCalendar nextDayBreakCal = WorkCalendar.CreateBuilder()
+                .WithWorkingHours(TimeSpan.FromHours(8), TimeSpan.FromHours(17))
+                .AddBreak(WorkTimeRange.Parse("36:00-37:00"))
+                .Build();
+
+            Assert.Equal(new DateTime(2026, 5, 11, 17, 0, 0), nextDayBreakCal.AddWorkingTime(monStart, TimeSpan.FromHours(9), OvertimePolicy.Unlimited));
+            WorkingTimeBreakdown nextDayBreakBreakdown = nextDayBreakCal.GetWorkingTimeBreakdown(
+                monStart,
+                new DateTime(2026, 5, 11, 17, 0, 0),
+                OvertimePolicy.Unlimited);
+            Assert.Equal(TimeSpan.FromHours(9), nextDayBreakBreakdown.Regular);
+            Assert.Equal(TimeSpan.Zero, nextDayBreakBreakdown.Overtime);
+            Assert.Equal(TimeSpan.FromHours(9), nextDayBreakBreakdown.Total);
+        }
+
+        [Fact]
+        public void OvertimePolicy_MaxPerDay_SupportsExtendingPast48HoursWithoutTruncation()
+        {
+            // PR指摘#4: 休憩なし夜勤 22:00-30:00 に MaxPerDay(20h) を指定し、金曜 22:00 + 28h = 日曜 02:00（50:00）になること
+            WorkCalendar night = WorkCalendar.CreateBuilder()
+                .WithWorkingHours(TimeSpan.FromHours(22), TimeSpan.FromHours(6))
+                .Build();
+
+            OvertimePolicy max20h = OvertimePolicy.MaxPerDay(TimeSpan.FromHours(20));
+            var friNight = new DateTime(2026, 5, 8, 22, 0, 0);
+
+            DateTime sunMorning = night.AddWorkingTime(friNight, TimeSpan.FromHours(28), max20h);
+            Assert.Equal(new DateTime(2026, 5, 10, 2, 0, 0), sunMorning);
+            Assert.Equal(friNight, night.SubtractWorkingTime(sunMorning, TimeSpan.FromHours(28), max20h));
+
+            WorkingTimeBreakdown breakdown = night.GetWorkingTimeBreakdown(friNight, sunMorning, max20h);
+            Assert.Equal(TimeSpan.FromHours(8), breakdown.Regular);
+            Assert.Equal(TimeSpan.FromHours(20), breakdown.Overtime);
+            Assert.Equal(TimeSpan.FromHours(28), breakdown.Total);
+
+            IReadOnlyList<DateTimeInterval> shift = night.GetShiftIntervals(new DateTime(2026, 5, 8), max20h);
+            Assert.Single(shift);
+            Assert.Equal(new DateTimeInterval(friNight, sunMorning), shift[0]);
+        }
+
+        [Fact]
+        public void IsOvertime_ExcludesRegularWorkingHoursWhenPreviousDayOvertimeOverlapsToday()
+        {
+            // PR指摘#5: 定時 08:00-17:00・残業 17:00-34:00（翌10:00まで）の場合、
+            // 翌稼働日の 09:00 は定時優先のため IsOvertime == false、翌稼働日 07:00 や土曜 09:00 は IsOvertime == true となること
+            WorkCalendar cal = WorkCalendar.CreateBuilder()
+                .WithWorkingHours(TimeSpan.FromHours(8), TimeSpan.FromHours(17))
+                .ClearBreaks()
+                .WithOvertimeHours(TimeSpan.FromHours(17), TimeSpan.FromHours(34))
+                .Build();
+
+            // 2026-05-12(火) 09:00 は前日(月)残業と重複するが定時内 -> false
+            var tue9am = new DateTime(2026, 5, 12, 9, 0, 0);
+            Assert.True(cal.IsWorkingTime(tue9am));
+            Assert.False(cal.IsOvertime(tue9am));
+
+            // 2026-05-12(火) 07:00 は定時外かつ前日残業内 -> true
+            Assert.True(cal.IsOvertime(new DateTime(2026, 5, 12, 7, 0, 0)));
+
+            // 2026-05-09(土) 09:00 は非稼働日かつ前日(金)残業内 -> true
+            Assert.True(cal.IsOvertime(new DateTime(2026, 5, 9, 9, 0, 0)));
+        }
+
+        [Fact]
+        public void OvertimePolicy_Unlimited_GetWorkingTimeAndIntervals_SnapToFirstValidShiftStartInRange()
+        {
+            // PR指摘#6: 土曜 08:00 〜 月曜 19:00 を Unlimited で集計すると、
+            // 土日や月曜始業前を含めず月曜 08:00 開始扱いで 10 時間となること
+            WorkCalendar cal = WorkCalendar.CreateDefault();
+            var satStart = new DateTime(2026, 5, 9, 8, 0, 0);
+            var monFinish = new DateTime(2026, 5, 11, 19, 0, 0);
+
+            Assert.Equal(monFinish, cal.AddWorkingTime(satStart, TimeSpan.FromHours(10), OvertimePolicy.Unlimited));
+            Assert.Equal(TimeSpan.FromHours(10), cal.GetWorkingTime(satStart, monFinish, OvertimePolicy.Unlimited));
+
+            IReadOnlyList<DateTimeInterval> intervals = cal.GetWorkingIntervals(satStart, monFinish, OvertimePolicy.Unlimited);
+            Assert.Equal(2, intervals.Count);
+            Assert.Equal(new DateTimeInterval(new DateTime(2026, 5, 11, 8, 0, 0), new DateTime(2026, 5, 11, 12, 0, 0)), intervals[0]);
+            Assert.Equal(new DateTimeInterval(new DateTime(2026, 5, 11, 13, 0, 0), monFinish), intervals[1]);
+
+            WorkingTimeBreakdown breakdown = cal.GetWorkingTimeBreakdown(satStart, monFinish, OvertimePolicy.Unlimited);
+            Assert.Equal(TimeSpan.FromHours(8), breakdown.Regular);
+            Assert.Equal(TimeSpan.FromHours(2), breakdown.Overtime);
+            Assert.Equal(TimeSpan.FromHours(10), breakdown.Total);
+
+            // 有効な開始がない範囲（土日のみ、または月曜 08:00 ちょうどまで）は 0 と空リスト
+            Assert.Equal(TimeSpan.Zero, cal.GetWorkingTime(satStart, new DateTime(2026, 5, 10, 17, 0, 0), OvertimePolicy.Unlimited));
+            Assert.Empty(cal.GetWorkingIntervals(satStart, new DateTime(2026, 5, 11, 8, 0, 0), OvertimePolicy.Unlimited));
+
+            // IsWorkingTime(Unlimited) と GetNextWorkingTime / GetPreviousWorkingTime の整合性
+            Assert.False(cal.IsWorkingTime(satStart, OvertimePolicy.Unlimited));
+            Assert.Equal(new DateTime(2026, 5, 11, 8, 0, 0), cal.GetNextWorkingTime(satStart, OvertimePolicy.Unlimited));
+            Assert.Equal(new DateTime(2026, 5, 8, 17, 0, 0), cal.GetPreviousWorkingTime(satStart, OvertimePolicy.Unlimited));
+        }
+
+        [Fact]
+        public void WorkCalendarBuilder_WithScheduleFollowedByOvertimeMethods_PreservesSchedulePeriodsAndBreaks()
+        {
+            // PR指摘#7: WithSchedule の後に残業系メソッドを呼んでも明示スケジュールの定時・休憩（および既存残業）が保持されること
+            var nightWithOt = new DailyWorkSchedule(
+                new[] { WorkTimeRange.Parse("22:00-06:00") },
+                new[] { WorkTimeRange.Parse("02:00-03:00") },
+                new[] { WorkTimeRange.Parse("06:00-07:00") });
+
+            WorkCalendar replaced = WorkCalendar.CreateBuilder()
+                .WithSchedule(nightWithOt)
+                .WithOvertimeHours(TimeSpan.FromHours(6), TimeSpan.FromHours(8))
+                .Build();
+            Assert.Equal(TimeSpan.FromHours(7), replaced.Schedule.TotalWorkingDuration);
+            Assert.Equal(TimeSpan.FromHours(2), replaced.Schedule.TotalOvertimeDuration);
+            Assert.True(replaced.Schedule.HasOvernightSpillover);
+
+            WorkCalendar added = WorkCalendar.CreateBuilder()
+                .WithSchedule(nightWithOt)
+                .AddOvertimeHours(TimeSpan.FromHours(7), TimeSpan.FromHours(8))
+                .Build();
+            Assert.Equal(TimeSpan.FromHours(7), added.Schedule.TotalWorkingDuration);
+            Assert.Equal(TimeSpan.FromHours(2), added.Schedule.TotalOvertimeDuration);
+
+            WorkCalendar addedPeriod = WorkCalendar.CreateBuilder()
+                .WithSchedule(nightWithOt)
+                .AddOvertimePeriod(WorkTimeRange.Parse("31:00-33:00"))
+                .Build();
+            Assert.Equal(TimeSpan.FromHours(7), addedPeriod.Schedule.TotalWorkingDuration);
+            Assert.Equal(TimeSpan.FromHours(3), addedPeriod.Schedule.TotalOvertimeDuration);
+
+            WorkCalendar cleared = WorkCalendar.CreateBuilder()
+                .WithSchedule(nightWithOt)
+                .ClearOvertime()
+                .Build();
+            Assert.Equal(TimeSpan.FromHours(7), cleared.Schedule.TotalWorkingDuration);
+            Assert.False(cleared.Schedule.HasOvertime);
+            Assert.True(cleared.Schedule.HasOvernightSpillover);
+        }
     }
 }

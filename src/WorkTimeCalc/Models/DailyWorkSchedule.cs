@@ -14,9 +14,9 @@ namespace WorkTimeCalc.Models
         private readonly DaySliceSet _regularSliceSet;
         private readonly DaySliceSet _overtimeOnlySliceSet;
         private readonly DaySliceSet _calendarOvertimeSliceSet;
+        private readonly DaySliceSet _unlimitedSliceSet;
+        private readonly List<WorkTimeRange> _inputBreaks;
         private readonly List<RawSpan> _effectiveWorkingSpans;
-        private readonly List<RawSpan> _dailyBreakSpans;
-        private readonly WorkTimeRange[] _unlimitedDaySlices;
         private readonly TimeSpan _lastRegularEnd;
 
         /// <summary>
@@ -90,36 +90,26 @@ namespace WorkTimeCalc.Models
             WorkingPeriods = new ReadOnlyCollection<WorkTimeRange>(inputPeriods.ToArray());
             Breaks = new ReadOnlyCollection<WorkTimeRange>(inputBreaks.ToArray());
             OvertimePeriods = new ReadOnlyCollection<WorkTimeRange>(inputOvertime.ToArray());
+            _inputBreaks = inputBreaks;
 
+            // 1. 定時用の休憩正規化は従来どおり定時時間帯のみを基準に行う（残業枠で定時が変わらないようにする）
             List<RawSpan> mergedWorking = MergeSpans(ToRawSpans(inputPeriods));
-            List<RawSpan> mergedOvertimeRaw = MergeSpans(ToRawSpans(inputOvertime));
-
-            List<RawSpan> mergedAllRaw;
-            if (mergedOvertimeRaw.Count > 0)
-            {
-                var combinedRaw = new List<RawSpan>(mergedWorking.Count + mergedOvertimeRaw.Count);
-                combinedRaw.AddRange(mergedWorking);
-                combinedRaw.AddRange(mergedOvertimeRaw);
-                mergedAllRaw = MergeSpans(combinedRaw);
-            }
-            else
-            {
-                mergedAllRaw = mergedWorking;
-            }
-
-            List<RawSpan> normalizedBreaks = NormalizeBreaks(inputBreaks, mergedAllRaw);
-            List<RawSpan> effectiveWorkingSpans = SubtractBreaks(mergedWorking, normalizedBreaks);
+            List<RawSpan> regularBreaks = NormalizeBreaks(inputBreaks, mergedWorking);
+            List<RawSpan> effectiveWorkingSpans = SubtractBreaks(mergedWorking, regularBreaks);
 
             if (effectiveWorkingSpans.Count == 0)
             {
                 throw new ArgumentException("休憩時間により実効稼働時間が 0 になっています。稼働時間帯または休憩時間を見直してください。", nameof(breaks));
             }
 
+            // 2. 残業時間帯は定時を優先控除し、残業帯を基準に正規化した休憩を控除する
+            List<RawSpan> mergedOvertimeRaw = MergeSpans(ToRawSpans(inputOvertime));
             List<RawSpan> effectiveOvertimeSpans;
             if (mergedOvertimeRaw.Count > 0)
             {
                 List<RawSpan> overtimeWithoutRegular = SubtractBreaks(mergedOvertimeRaw, mergedWorking);
-                effectiveOvertimeSpans = SubtractBreaks(overtimeWithoutRegular, normalizedBreaks);
+                List<RawSpan> overtimeBreaks = NormalizeBreaks(inputBreaks, overtimeWithoutRegular);
+                effectiveOvertimeSpans = SubtractBreaks(overtimeWithoutRegular, overtimeBreaks);
                 if (effectiveOvertimeSpans.Count == 0)
                 {
                     throw new ArgumentException(
@@ -168,11 +158,17 @@ namespace WorkTimeCalc.Models
                 HasOvernightSpilloverWithOvertime = HasOvernightSpillover;
             }
 
-            _dailyBreakSpans = BuildDailyBreakSpans(inputBreaks);
-            List<RawSpan> unlimitedSpans = SubtractBreaks(
-                new List<RawSpan> { new RawSpan(TimeSpan.Zero, TimeFormatHelper.OneDay) },
-                _dailyBreakSpans);
-            _unlimitedDaySlices = ToWorkTimeRanges(unlimitedSpans).ToArray();
+            // 3. Unlimited 用スライスセット:
+            //    定時エンベロープ内は実効定時区間（分割シフトの隙間・定時休憩）を厳密に保持し、
+            //    定時エンベロープ外の延長部分のみ日内投影休憩を控除する
+            var regularEnvelope = new List<RawSpan>(1)
+            {
+                new RawSpan(mergedWorking[0].Start, mergedWorking[mergedWorking.Count - 1].End)
+            };
+            DaySliceSet envelopeSliceSet = BuildSliceSet(regularEnvelope);
+            List<RawSpan> extensionDailyBreaks = BuildDailyBreakSpans(inputBreaks);
+
+            _unlimitedSliceSet = BuildUnlimitedSliceSet(_regularSliceSet, envelopeSliceSet, extensionDailyBreaks);
         }
 
         /// <summary>
@@ -241,7 +237,7 @@ namespace WorkTimeCalc.Models
 
         internal DaySliceSet CalendarOvertimeSliceSet => _calendarOvertimeSliceSet;
 
-        internal WorkTimeRange[] UnlimitedDaySlices => _unlimitedDaySlices;
+        internal DaySliceSet UnlimitedSliceSet => _unlimitedSliceSet;
 
         internal TimeSpan FirstRegularStart { get; }
 
@@ -255,6 +251,7 @@ namespace WorkTimeCalc.Models
 
         /// <summary>
         /// 定時終了後に 1 日あたり最大 <paramref name="maxOvertime"/> までの動的残業を延長したスライスセットを構築します。
+        /// 48:00 を超える複数日跨ぎの残業延長にも対応します。
         /// </summary>
         internal DaySliceSet BuildDynamicOvertimeSliceSet(TimeSpan maxOvertime)
         {
@@ -263,42 +260,46 @@ namespace WorkTimeCalc.Models
                 return _regularSliceSet;
             }
 
-            List<RawSpan> extendedBreaks = BuildExtendedBreakSpans(_dailyBreakSpans);
             var dynamicOvertimeSpans = new List<RawSpan>();
-
             TimeSpan cursor = _lastRegularEnd;
-            TimeSpan limit = TimeFormatHelper.MaxShiftTime;
             long remainingTicks = maxOvertime.Ticks;
-            int breakIndex = 0;
+            TimeSpan windowLength = TimeFormatHelper.MaxShiftTime; // 48時間単位で休憩を展開
 
-            while (remainingTicks > 0 && cursor < limit)
+            while (remainingTicks > 0)
             {
-                while (breakIndex < extendedBreaks.Count && extendedBreaks[breakIndex].End <= cursor)
+                TimeSpan windowEnd = cursor + windowLength;
+                List<RawSpan> windowBreaks = BuildBreakSpansInWindow(_inputBreaks, cursor, windowEnd);
+                int breakIndex = 0;
+
+                while (remainingTicks > 0 && cursor < windowEnd)
                 {
-                    breakIndex++;
+                    while (breakIndex < windowBreaks.Count && windowBreaks[breakIndex].End <= cursor)
+                    {
+                        breakIndex++;
+                    }
+
+                    if (breakIndex < windowBreaks.Count && windowBreaks[breakIndex].Start <= cursor)
+                    {
+                        cursor = windowBreaks[breakIndex].End;
+                        continue;
+                    }
+
+                    TimeSpan segmentEnd = (breakIndex < windowBreaks.Count && windowBreaks[breakIndex].Start < windowEnd)
+                        ? windowBreaks[breakIndex].Start
+                        : windowEnd;
+
+                    long availableTicks = (segmentEnd - cursor).Ticks;
+                    if (availableTicks <= 0)
+                    {
+                        break;
+                    }
+
+                    long takeTicks = remainingTicks < availableTicks ? remainingTicks : availableTicks;
+                    TimeSpan nextCursor = cursor + TimeSpan.FromTicks(takeTicks);
+                    dynamicOvertimeSpans.Add(new RawSpan(cursor, nextCursor));
+                    cursor = nextCursor;
+                    remainingTicks -= takeTicks;
                 }
-
-                if (breakIndex < extendedBreaks.Count && extendedBreaks[breakIndex].Start <= cursor)
-                {
-                    cursor = extendedBreaks[breakIndex].End;
-                    continue;
-                }
-
-                TimeSpan segmentEnd = (breakIndex < extendedBreaks.Count && extendedBreaks[breakIndex].Start < limit)
-                    ? extendedBreaks[breakIndex].Start
-                    : limit;
-
-                long availableTicks = (segmentEnd - cursor).Ticks;
-                if (availableTicks <= 0)
-                {
-                    break;
-                }
-
-                long takeTicks = remainingTicks < availableTicks ? remainingTicks : availableTicks;
-                TimeSpan nextCursor = cursor + TimeSpan.FromTicks(takeTicks);
-                dynamicOvertimeSpans.Add(new RawSpan(cursor, nextCursor));
-                cursor = nextCursor;
-                remainingTicks -= takeTicks;
             }
 
             if (dynamicOvertimeSpans.Count == 0)
@@ -312,56 +313,7 @@ namespace WorkTimeCalc.Models
             return BuildSliceSet(MergeSpans(combined));
         }
 
-        internal sealed class DaySliceSet
-        {
-            public static DaySliceSet Empty { get; } = new DaySliceSet(
-                Array.Empty<WorkTimeRange>(),
-                Array.Empty<WorkTimeRange>(),
-                Array.Empty<WorkTimeRange>(),
-                Array.Empty<WorkTimeRange>(),
-                Array.Empty<WorkTimeRange>(),
-                hasOvernightSpillover: false);
-
-            public DaySliceSet(
-                WorkTimeRange[] neitherSlices,
-                WorkTimeRange[] sameDayOnlySlices,
-                WorkTimeRange[] spilloverOnlySlices,
-                WorkTimeRange[] bothDaysSlices,
-                IReadOnlyList<WorkTimeRange> effectiveRanges,
-                bool hasOvernightSpillover)
-            {
-                NeitherSlices = neitherSlices;
-                SameDayOnlySlices = sameDayOnlySlices;
-                SpilloverOnlySlices = spilloverOnlySlices;
-                BothDaysSlices = bothDaysSlices;
-                EffectiveRanges = effectiveRanges;
-                HasOvernightSpillover = hasOvernightSpillover;
-            }
-
-            public WorkTimeRange[] NeitherSlices { get; }
-
-            public WorkTimeRange[] SameDayOnlySlices { get; }
-
-            public WorkTimeRange[] SpilloverOnlySlices { get; }
-
-            public WorkTimeRange[] BothDaysSlices { get; }
-
-            public IReadOnlyList<WorkTimeRange> EffectiveRanges { get; }
-
-            public bool HasOvernightSpillover { get; }
-
-            public WorkTimeRange[] GetDaySlices(bool isPreviousDayWorking, bool isCurrentDayWorking)
-            {
-                if (isPreviousDayWorking)
-                {
-                    return isCurrentDayWorking ? BothDaysSlices : SpilloverOnlySlices;
-                }
-
-                return isCurrentDayWorking ? SameDayOnlySlices : NeitherSlices;
-            }
-        }
-
-        private readonly struct RawSpan : IComparable<RawSpan>
+        internal readonly struct RawSpan : IComparable<RawSpan>
         {
             public RawSpan(TimeSpan start, TimeSpan end)
             {
@@ -380,6 +332,100 @@ namespace WorkTimeCalc.Models
             }
         }
 
+        internal sealed class DaySliceSet
+        {
+            private readonly List<RawSpan>[]? _slicesByDayOffset;
+
+            public static DaySliceSet Empty { get; } = new DaySliceSet(
+                Array.Empty<RawSpan>(),
+                Array.Empty<WorkTimeRange>(),
+                Array.Empty<WorkTimeRange>(),
+                Array.Empty<WorkTimeRange>(),
+                Array.Empty<WorkTimeRange>(),
+                Array.Empty<WorkTimeRange>(),
+                maxSpilloverDays: 0,
+                slicesByDayOffset: null);
+
+            public DaySliceSet(
+                RawSpan[] effectiveSpans,
+                WorkTimeRange[] neitherSlices,
+                WorkTimeRange[] sameDayOnlySlices,
+                WorkTimeRange[] spilloverOnlySlices,
+                WorkTimeRange[] bothDaysSlices,
+                IReadOnlyList<WorkTimeRange> effectiveRanges,
+                int maxSpilloverDays,
+                List<RawSpan>[]? slicesByDayOffset)
+            {
+                EffectiveSpans = effectiveSpans;
+                NeitherSlices = neitherSlices;
+                SameDayOnlySlices = sameDayOnlySlices;
+                SpilloverOnlySlices = spilloverOnlySlices;
+                BothDaysSlices = bothDaysSlices;
+                EffectiveRanges = effectiveRanges;
+                MaxSpilloverDays = maxSpilloverDays;
+                _slicesByDayOffset = slicesByDayOffset;
+            }
+
+            public RawSpan[] EffectiveSpans { get; }
+
+            public WorkTimeRange[] NeitherSlices { get; }
+
+            public WorkTimeRange[] SameDayOnlySlices { get; }
+
+            public WorkTimeRange[] SpilloverOnlySlices { get; }
+
+            public WorkTimeRange[] BothDaysSlices { get; }
+
+            public IReadOnlyList<WorkTimeRange> EffectiveRanges { get; }
+
+            public int MaxSpilloverDays { get; }
+
+            public bool HasOvernightSpillover => MaxSpilloverDays > 0;
+
+            public WorkTimeRange[] GetDaySlices(bool isPreviousDayWorking, bool isCurrentDayWorking)
+            {
+                if (isPreviousDayWorking)
+                {
+                    return isCurrentDayWorking ? BothDaysSlices : SpilloverOnlySlices;
+                }
+
+                return isCurrentDayWorking ? SameDayOnlySlices : NeitherSlices;
+            }
+
+            public WorkTimeRange[] GetDaySlices(DateTime date, DateTime minSearchDate, Func<DateTime, bool> isWorkingDay)
+            {
+                if (_slicesByDayOffset == null)
+                {
+                    bool isCurrentWorking = isWorkingDay(date);
+                    bool isPreviousWorking = date > minSearchDate && isWorkingDay(date.AddDays(-1));
+                    return GetDaySlices(isPreviousWorking, isCurrentWorking);
+                }
+
+                var collected = new List<RawSpan>();
+                int availableBackDays = (date - minSearchDate).Days;
+                int limit = MaxSpilloverDays < availableBackDays ? MaxSpilloverDays : availableBackDays;
+
+                for (int offset = 0; offset <= limit; offset++)
+                {
+                    List<RawSpan> daySlices = _slicesByDayOffset[offset];
+                    if (daySlices.Count == 0)
+                    {
+                        continue;
+                    }
+
+                    DateTime origin = offset == 0 ? date : date.AddDays(-offset);
+                    if (isWorkingDay(origin))
+                    {
+                        collected.AddRange(daySlices);
+                    }
+                }
+
+                return collected.Count == 0
+                    ? Array.Empty<WorkTimeRange>()
+                    : ToWorkTimeRanges(MergeSpans(collected)).ToArray();
+            }
+        }
+
         private static DaySliceSet BuildSliceSet(List<RawSpan> effectiveSpans)
         {
             if (effectiveSpans.Count == 0)
@@ -387,41 +433,119 @@ namespace WorkTimeCalc.Models
                 return DaySliceSet.Empty;
             }
 
-            bool hasSpillover = false;
+            TimeSpan maxEnd = TimeSpan.Zero;
             foreach (RawSpan span in effectiveSpans)
             {
-                if (span.End > TimeFormatHelper.OneDay)
+                if (span.End > maxEnd)
                 {
-                    hasSpillover = true;
-                    break;
+                    maxEnd = span.End;
                 }
             }
 
-            IReadOnlyList<WorkTimeRange> effectiveRanges =
-                new ReadOnlyCollection<WorkTimeRange>(ToWorkTimeRanges(effectiveSpans).ToArray());
+            int maxSpilloverDays = maxEnd <= TimeFormatHelper.OneDay
+                ? 0
+                : (int)((maxEnd.Ticks - 1) / TimeFormatHelper.OneDay.Ticks);
 
-            List<RawSpan> sameDaySpans = ClipAndShift(effectiveSpans, TimeSpan.Zero, TimeFormatHelper.OneDay, TimeSpan.Zero);
-            WorkTimeRange[] sameDayOnlySlices = ToWorkTimeRanges(MergeSpans(sameDaySpans)).ToArray();
+            IReadOnlyList<WorkTimeRange> effectiveRanges = maxEnd <= TimeFormatHelper.MaxShiftTime
+                ? new ReadOnlyCollection<WorkTimeRange>(ToWorkTimeRanges(effectiveSpans).ToArray())
+                : Array.Empty<WorkTimeRange>();
 
-            List<RawSpan> spilloverSpans = ClipAndShift(
-                effectiveSpans,
-                TimeFormatHelper.OneDay,
-                TimeFormatHelper.MaxShiftTime,
-                -TimeFormatHelper.OneDay);
-            WorkTimeRange[] spilloverOnlySlices = ToWorkTimeRanges(MergeSpans(spilloverSpans)).ToArray();
+            if (maxSpilloverDays <= 1)
+            {
+                List<RawSpan> sameDaySpans = ClipAndShift(effectiveSpans, TimeSpan.Zero, TimeFormatHelper.OneDay, TimeSpan.Zero);
+                WorkTimeRange[] sameDayOnlySlices = ToWorkTimeRanges(MergeSpans(sameDaySpans)).ToArray();
 
-            var combinedSpans = new List<RawSpan>(sameDaySpans.Count + spilloverSpans.Count);
-            combinedSpans.AddRange(spilloverSpans);
-            combinedSpans.AddRange(sameDaySpans);
-            WorkTimeRange[] bothDaysSlices = ToWorkTimeRanges(MergeSpans(combinedSpans)).ToArray();
+                List<RawSpan> spilloverSpans = ClipAndShift(
+                    effectiveSpans,
+                    TimeFormatHelper.OneDay,
+                    TimeFormatHelper.MaxShiftTime,
+                    -TimeFormatHelper.OneDay);
+                WorkTimeRange[] spilloverOnlySlices = ToWorkTimeRanges(MergeSpans(spilloverSpans)).ToArray();
+
+                var combinedSpans = new List<RawSpan>(sameDaySpans.Count + spilloverSpans.Count);
+                combinedSpans.AddRange(spilloverSpans);
+                combinedSpans.AddRange(sameDaySpans);
+                WorkTimeRange[] bothDaysSlices = ToWorkTimeRanges(MergeSpans(combinedSpans)).ToArray();
+
+                return new DaySliceSet(
+                    effectiveSpans.ToArray(),
+                    Array.Empty<WorkTimeRange>(),
+                    sameDayOnlySlices,
+                    spilloverOnlySlices,
+                    bothDaysSlices,
+                    effectiveRanges,
+                    maxSpilloverDays,
+                    slicesByDayOffset: null);
+            }
+
+            var slicesByDayOffset = new List<RawSpan>[maxSpilloverDays + 1];
+            for (int d = 0; d <= maxSpilloverDays; d++)
+            {
+                TimeSpan windowStart = TimeSpan.FromTicks(d * TimeFormatHelper.OneDay.Ticks);
+                TimeSpan windowEnd = windowStart + TimeFormatHelper.OneDay;
+                slicesByDayOffset[d] = MergeSpans(ClipAndShift(effectiveSpans, windowStart, windowEnd, -windowStart));
+            }
 
             return new DaySliceSet(
+                effectiveSpans.ToArray(),
                 Array.Empty<WorkTimeRange>(),
-                sameDayOnlySlices,
-                spilloverOnlySlices,
-                bothDaysSlices,
+                Array.Empty<WorkTimeRange>(),
+                Array.Empty<WorkTimeRange>(),
+                Array.Empty<WorkTimeRange>(),
                 effectiveRanges,
-                hasSpillover);
+                maxSpilloverDays,
+                slicesByDayOffset);
+        }
+
+        private static DaySliceSet BuildUnlimitedSliceSet(
+            DaySliceSet regularSliceSet,
+            DaySliceSet envelopeSliceSet,
+            List<RawSpan> extensionDailyBreaks)
+        {
+            WorkTimeRange[] neither = BuildUnlimitedStateSlices(
+                regularSliceSet.NeitherSlices,
+                envelopeSliceSet.NeitherSlices,
+                extensionDailyBreaks);
+            WorkTimeRange[] sameDay = BuildUnlimitedStateSlices(
+                regularSliceSet.SameDayOnlySlices,
+                envelopeSliceSet.SameDayOnlySlices,
+                extensionDailyBreaks);
+            WorkTimeRange[] spillover = BuildUnlimitedStateSlices(
+                regularSliceSet.SpilloverOnlySlices,
+                envelopeSliceSet.SpilloverOnlySlices,
+                extensionDailyBreaks);
+            WorkTimeRange[] bothDays = BuildUnlimitedStateSlices(
+                regularSliceSet.BothDaysSlices,
+                envelopeSliceSet.BothDaysSlices,
+                extensionDailyBreaks);
+
+            return new DaySliceSet(
+                Array.Empty<RawSpan>(),
+                neither,
+                sameDay,
+                spillover,
+                bothDays,
+                Array.Empty<WorkTimeRange>(),
+                maxSpilloverDays: regularSliceSet.MaxSpilloverDays,
+                slicesByDayOffset: null);
+        }
+
+        private static WorkTimeRange[] BuildUnlimitedStateSlices(
+            WorkTimeRange[] regularStateSlices,
+            WorkTimeRange[] envelopeStateSlices,
+            List<RawSpan> extensionDailyBreaks)
+        {
+            var fullDay = new List<RawSpan>(1) { new RawSpan(TimeSpan.Zero, TimeFormatHelper.OneDay) };
+            List<RawSpan> envSpans = ToRawSpans(envelopeStateSlices);
+            List<RawSpan> outsideEnv = SubtractBreaks(fullDay, envSpans);
+            List<RawSpan> extensionSpans = SubtractBreaks(outsideEnv, extensionDailyBreaks);
+
+            List<RawSpan> regSpans = ToRawSpans(regularStateSlices);
+            var combined = new List<RawSpan>(regSpans.Count + extensionSpans.Count);
+            combined.AddRange(regSpans);
+            combined.AddRange(extensionSpans);
+
+            return ToWorkTimeRanges(MergeSpans(combined)).ToArray();
         }
 
         private static List<RawSpan> BuildDailyBreakSpans(List<WorkTimeRange> inputBreaks)
@@ -445,21 +569,43 @@ namespace WorkTimeCalc.Models
             return MergeSpans(projected);
         }
 
-        private static List<RawSpan> BuildExtendedBreakSpans(List<RawSpan> dailyBreakSpans)
+        private static List<RawSpan> BuildBreakSpansInWindow(
+            List<WorkTimeRange> inputBreaks,
+            TimeSpan windowStart,
+            TimeSpan windowEnd)
         {
-            if (dailyBreakSpans.Count == 0)
+            if (inputBreaks.Count == 0)
             {
                 return new List<RawSpan>();
             }
 
-            var extended = new List<RawSpan>(dailyBreakSpans.Count * 2);
-            extended.AddRange(dailyBreakSpans);
-            foreach (RawSpan brk in dailyBreakSpans)
+            long oneDayTicks = TimeFormatHelper.OneDay.Ticks;
+            var result = new List<RawSpan>();
+
+            foreach (WorkTimeRange brk in inputBreaks)
             {
-                extended.Add(new RawSpan(brk.Start + TimeFormatHelper.OneDay, brk.End + TimeFormatHelper.OneDay));
+                long firstDay = brk.End <= windowStart
+                    ? ((windowStart - brk.End).Ticks / oneDayTicks) + 1
+                    : 0;
+
+                for (long dayOffset = firstDay; ; dayOffset++)
+                {
+                    TimeSpan shift = TimeSpan.FromTicks(dayOffset * oneDayTicks);
+                    TimeSpan shiftedStart = brk.Start + shift;
+                    if (shiftedStart >= windowEnd)
+                    {
+                        break;
+                    }
+
+                    TimeSpan shiftedEnd = brk.End + shift;
+                    if (shiftedEnd > windowStart)
+                    {
+                        result.Add(new RawSpan(shiftedStart, shiftedEnd));
+                    }
+                }
             }
 
-            return MergeSpans(extended);
+            return MergeSpans(result);
         }
 
         private static TimeSpan SumDuration(List<RawSpan> spans)
@@ -473,12 +619,12 @@ namespace WorkTimeCalc.Models
             return new TimeSpan(totalTicks);
         }
 
-        private static List<RawSpan> ToRawSpans(List<WorkTimeRange> ranges)
+        private static List<RawSpan> ToRawSpans(IReadOnlyList<WorkTimeRange> ranges)
         {
             var result = new List<RawSpan>(ranges.Count);
-            foreach (WorkTimeRange range in ranges)
+            for (int i = 0; i < ranges.Count; i++)
             {
-                result.Add(new RawSpan(range.Start, range.End));
+                result.Add(new RawSpan(ranges[i].Start, ranges[i].End));
             }
 
             return result;
@@ -516,9 +662,9 @@ namespace WorkTimeCalc.Models
             return merged;
         }
 
-        private static List<RawSpan> NormalizeBreaks(List<WorkTimeRange> inputBreaks, List<RawSpan> mergedWorking)
+        private static List<RawSpan> NormalizeBreaks(List<WorkTimeRange> inputBreaks, List<RawSpan> mergedTargets)
         {
-            if (inputBreaks.Count == 0)
+            if (inputBreaks.Count == 0 || mergedTargets.Count == 0)
             {
                 return new List<RawSpan>();
             }
@@ -527,13 +673,13 @@ namespace WorkTimeCalc.Models
             foreach (WorkTimeRange brk in inputBreaks)
             {
                 var candidate = new RawSpan(brk.Start, brk.End);
-                if (!OverlapsAny(candidate, mergedWorking) && brk.End <= TimeFormatHelper.OneDay)
+                if (!OverlapsAny(candidate, mergedTargets) && brk.End <= TimeFormatHelper.OneDay)
                 {
                     var shifted = new RawSpan(
                         brk.Start + TimeFormatHelper.OneDay,
                         brk.End + TimeFormatHelper.OneDay);
 
-                    if (OverlapsAny(shifted, mergedWorking))
+                    if (OverlapsAny(shifted, mergedTargets))
                     {
                         candidate = shifted;
                     }

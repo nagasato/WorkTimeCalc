@@ -78,7 +78,7 @@ namespace WorkTimeCalc
         /// <returns>このビルダーインスタンス。</returns>
         public WorkCalendarBuilder WithWorkingHours(TimeSpan start, TimeSpan end)
         {
-            _explicitSchedule = null;
+            MaterializeExplicitScheduleIfNeeded();
             _workingPeriods.Clear();
             _workingPeriods.Add(WorkTimeRange.FromClock(start, end));
             return this;
@@ -92,7 +92,7 @@ namespace WorkTimeCalc
         /// <returns>このビルダーインスタンス。</returns>
         public WorkCalendarBuilder AddWorkingHours(TimeSpan start, TimeSpan end)
         {
-            _explicitSchedule = null;
+            MaterializeExplicitScheduleIfNeeded();
             _workingPeriods.Add(WorkTimeRange.FromClock(start, end));
             return this;
         }
@@ -104,7 +104,7 @@ namespace WorkTimeCalc
         /// <returns>このビルダーインスタンス。</returns>
         public WorkCalendarBuilder AddWorkingPeriod(WorkTimeRange period)
         {
-            _explicitSchedule = null;
+            MaterializeExplicitScheduleIfNeeded();
             _workingPeriods.Add(period);
             return this;
         }
@@ -117,7 +117,7 @@ namespace WorkTimeCalc
         /// <returns>このビルダーインスタンス。</returns>
         public WorkCalendarBuilder AddBreak(TimeSpan start, TimeSpan end)
         {
-            _explicitSchedule = null;
+            MaterializeExplicitScheduleIfNeeded();
             _breaksCleared = false;
             _breaks.Add(WorkTimeRange.FromClock(start, end));
             return this;
@@ -130,7 +130,7 @@ namespace WorkTimeCalc
         /// <returns>このビルダーインスタンス。</returns>
         public WorkCalendarBuilder AddBreak(WorkTimeRange breakRange)
         {
-            _explicitSchedule = null;
+            MaterializeExplicitScheduleIfNeeded();
             _breaksCleared = false;
             _breaks.Add(breakRange);
             return this;
@@ -142,7 +142,7 @@ namespace WorkTimeCalc
         /// <returns>このビルダーインスタンス。</returns>
         public WorkCalendarBuilder ClearBreaks()
         {
-            _explicitSchedule = null;
+            MaterializeExplicitScheduleIfNeeded();
             _breaks.Clear();
             _breaksCleared = true;
             return this;
@@ -157,7 +157,7 @@ namespace WorkTimeCalc
         /// <returns>このビルダーインスタンス。</returns>
         public WorkCalendarBuilder WithOvertimeHours(TimeSpan start, TimeSpan end)
         {
-            _explicitSchedule = null;
+            MaterializeExplicitScheduleIfNeeded();
             _overtimePeriods.Clear();
             _overtimePeriods.Add(WorkTimeRange.FromClock(start, end));
             return this;
@@ -171,7 +171,7 @@ namespace WorkTimeCalc
         /// <returns>このビルダーインスタンス。</returns>
         public WorkCalendarBuilder AddOvertimeHours(TimeSpan start, TimeSpan end)
         {
-            _explicitSchedule = null;
+            MaterializeExplicitScheduleIfNeeded();
             _overtimePeriods.Add(WorkTimeRange.FromClock(start, end));
             return this;
         }
@@ -183,7 +183,7 @@ namespace WorkTimeCalc
         /// <returns>このビルダーインスタンス。</returns>
         public WorkCalendarBuilder AddOvertimePeriod(WorkTimeRange period)
         {
-            _explicitSchedule = null;
+            MaterializeExplicitScheduleIfNeeded();
             _overtimePeriods.Add(period);
             return this;
         }
@@ -194,9 +194,26 @@ namespace WorkTimeCalc
         /// <returns>このビルダーインスタンス。</returns>
         public WorkCalendarBuilder ClearOvertime()
         {
-            _explicitSchedule = null;
+            MaterializeExplicitScheduleIfNeeded();
             _overtimePeriods.Clear();
             return this;
+        }
+
+        private void MaterializeExplicitScheduleIfNeeded()
+        {
+            if (_explicitSchedule == null)
+            {
+                return;
+            }
+
+            _workingPeriods.Clear();
+            _workingPeriods.AddRange(_explicitSchedule.WorkingPeriods);
+            _breaks.Clear();
+            _breaks.AddRange(_explicitSchedule.Breaks);
+            _overtimePeriods.Clear();
+            _overtimePeriods.AddRange(_explicitSchedule.OvertimePeriods);
+            _breaksCleared = _explicitSchedule.Breaks.Count == 0;
+            _explicitSchedule = null;
         }
 
         /// <summary>

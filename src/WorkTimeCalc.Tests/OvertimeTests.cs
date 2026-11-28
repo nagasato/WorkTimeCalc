@@ -539,7 +539,8 @@ namespace WorkTimeCalc.Tests
             Assert.Throws<InvalidOperationException>(() =>
                 cal.AddWorkingTime(monStart, TimeSpan.FromHours(17), OvertimePolicy.MaxPerDay(TimeSpan.FromHours(8))));
 
-            // 終日休憩で非稼働日スライスが空となる場合、全曜日非稼働カレンダー＋Unlimited でも探索上限で停止すること
+            // 終日休憩 24:00-48:00 のとき、全曜日非稼働＋単日稼働上書きカレンダーの Unlimited は
+            // 当日（24:00まで）の 16h まで完了でき、24:00 を超える 17h では探索上限で例外になること
             WorkCalendar allNonWorkingOneOverride = WorkCalendar.CreateBuilder()
                 .WithWorkingHours(TimeSpan.FromHours(8), TimeSpan.FromHours(17))
                 .AddBreak(WorkTimeRange.Parse("24:00-48:00"))
@@ -555,8 +556,11 @@ namespace WorkTimeCalc.Tests
                 .AddWorkingDayOverride(new DateTime(2026, 5, 11), "単日稼働")
                 .Build();
 
+            DateTime unlimited16h = allNonWorkingOneOverride.AddWorkingTime(monStart, TimeSpan.FromHours(16), OvertimePolicy.Unlimited);
+            Assert.Equal(new DateTime(2026, 5, 12, 0, 0, 0), unlimited16h);
+            Assert.Equal(monStart, allNonWorkingOneOverride.SubtractWorkingTime(unlimited16h, TimeSpan.FromHours(16), OvertimePolicy.Unlimited));
             Assert.Throws<InvalidOperationException>(() =>
-                allNonWorkingOneOverride.AddWorkingTime(monStart, TimeSpan.FromHours(10), OvertimePolicy.Unlimited));
+                allNonWorkingOneOverride.AddWorkingTime(monStart, TimeSpan.FromHours(17), OvertimePolicy.Unlimited));
         }
 
         [Fact]
@@ -635,6 +639,68 @@ namespace WorkTimeCalc.Tests
             Assert.Equal(tue2am, cal.SubtractWorkingTime(tue3am, TimeSpan.FromHours(1), OvertimePolicy.Unlimited));
             Assert.Throws<InvalidOperationException>(() =>
                 cal.SubtractWorkingTime(tue3am, TimeSpan.FromHours(2), OvertimePolicy.Unlimited));
+        }
+
+        [Fact]
+        public void OvertimePolicy_MaxPerDay_UsesUnreducedRegularEndWhenLastRegularPeriodCoveredByBreak()
+        {
+            // 指摘#1: 最後の定時区間が休憩で全て控除されても、動的延長起点は休憩控除前の定時終了（17:00）を用いること
+            WorkCalendar cal = WorkCalendar.CreateBuilder()
+                .WithWorkingHours(TimeSpan.FromHours(8), TimeSpan.FromHours(12))
+                .AddWorkingHours(TimeSpan.FromHours(13), TimeSpan.FromHours(17))
+                .AddBreak(TimeSpan.FromHours(13), TimeSpan.FromHours(17))
+                .Build();
+
+            var mon8am = new DateTime(2026, 5, 11, 8, 0, 0);
+            var expected6pm = new DateTime(2026, 5, 11, 18, 0, 0);
+
+            Assert.Equal(expected6pm, cal.AddWorkingTime(mon8am, TimeSpan.FromHours(5), OvertimePolicy.MaxPerDay(TimeSpan.FromHours(1))));
+            Assert.Equal(expected6pm, cal.AddWorkingTime(mon8am, TimeSpan.FromHours(5), OvertimePolicy.Unlimited));
+        }
+
+        [Fact]
+        public void OvertimePolicy_Unlimited_DoesNotSubtractNextDayBreakOnStartDay()
+        {
+            // 指摘#2: 翌日休憩 42:00-43:00（翌 18:00-19:00）は開始日の残業から控除せず、Day 1 以降にのみ適用すること
+            WorkCalendar cal = WorkCalendar.CreateBuilder()
+                .WithWorkingHours(TimeSpan.FromHours(8), TimeSpan.FromHours(17))
+                .AddBreak(WorkTimeRange.Parse("42:00-43:00"))
+                .Build();
+
+            var mon5pm = new DateTime(2026, 5, 11, 17, 0, 0);
+            var mon7pm = new DateTime(2026, 5, 11, 19, 0, 0);
+
+            Assert.Equal(mon7pm, cal.AddWorkingTime(mon5pm, TimeSpan.FromHours(2), OvertimePolicy.MaxPerDay(TimeSpan.FromHours(2))));
+            Assert.Equal(mon7pm, cal.AddWorkingTime(mon5pm, TimeSpan.FromHours(2), OvertimePolicy.Unlimited));
+            Assert.Equal(TimeSpan.FromHours(2), cal.GetWorkingTime(mon5pm, mon7pm, OvertimePolicy.Unlimited));
+            Assert.Equal(mon5pm, cal.SubtractWorkingTime(mon7pm, TimeSpan.FromHours(2), OvertimePolicy.Unlimited));
+
+            var tue5pm = new DateTime(2026, 5, 12, 17, 0, 0);
+            Assert.Equal(new DateTime(2026, 5, 12, 19, 0, 0), cal.AddWorkingTime(tue5pm, TimeSpan.FromHours(2), OvertimePolicy.Unlimited));
+
+            // 翌日（Day 1）に跨ぐ 26h 加算: 月 17:00-24:00 (7h) + 火 00:00-18:00 (18h) + [火 18:00-19:00 休憩] + 火 19:00-20:00 (1h) = 火 20:00
+            var tue8pm = new DateTime(2026, 5, 12, 20, 0, 0);
+            Assert.Equal(tue8pm, cal.AddWorkingTime(mon5pm, TimeSpan.FromHours(26), OvertimePolicy.Unlimited));
+            Assert.Equal(TimeSpan.FromHours(26), cal.GetWorkingTime(mon5pm, tue8pm, OvertimePolicy.Unlimited));
+            Assert.Equal(mon5pm, cal.SubtractWorkingTime(tue8pm, TimeSpan.FromHours(26), OvertimePolicy.Unlimited));
+        }
+
+        [Fact]
+        public void GetShiftIntervals_Preserves24HourSplitWithin48Hours_AndUsesRawSpansPast48Hours()
+        {
+            // 指摘#3: 48:00 以内の定時 00:00-24:00, 24:00-48:00 では従来どおり 2 区間に分割されたまま返却すること
+            WorkCalendar cal = WorkCalendar.CreateBuilder()
+                .WithSchedule(new DailyWorkSchedule(new[]
+                {
+                    WorkTimeRange.Parse("00:00-24:00"),
+                    WorkTimeRange.Parse("24:00-48:00")
+                }))
+                .Build();
+
+            IReadOnlyList<DateTimeInterval> intervals = cal.GetShiftIntervals(new DateTime(2026, 5, 11));
+            Assert.Equal(2, intervals.Count);
+            Assert.Equal(new DateTimeInterval(new DateTime(2026, 5, 11, 0, 0, 0), new DateTime(2026, 5, 12, 0, 0, 0)), intervals[0]);
+            Assert.Equal(new DateTimeInterval(new DateTime(2026, 5, 12, 0, 0, 0), new DateTime(2026, 5, 13, 0, 0, 0)), intervals[1]);
         }
     }
 }

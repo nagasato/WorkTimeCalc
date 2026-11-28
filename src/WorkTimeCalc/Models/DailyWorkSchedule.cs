@@ -15,6 +15,7 @@ namespace WorkTimeCalc.Models
         private readonly DaySliceSet _overtimeOnlySliceSet;
         private readonly DaySliceSet _calendarOvertimeSliceSet;
         private readonly DaySliceSet _unlimitedSliceSet;
+        private readonly DaySliceSet _unlimitedFirstDaySliceSet;
         private readonly List<WorkTimeRange> _inputBreaks;
         private readonly List<RawSpan> _effectiveWorkingSpans;
         private readonly TimeSpan _lastRegularEnd;
@@ -124,7 +125,7 @@ namespace WorkTimeCalc.Models
 
             _effectiveWorkingSpans = effectiveWorkingSpans;
             FirstRegularStart = effectiveWorkingSpans[0].Start;
-            _lastRegularEnd = effectiveWorkingSpans[effectiveWorkingSpans.Count - 1].End;
+            _lastRegularEnd = mergedWorking[mergedWorking.Count - 1].End;
 
             TotalWorkingDuration = SumDuration(effectiveWorkingSpans);
             TotalOvertimeDuration = SumDuration(effectiveOvertimeSpans);
@@ -160,15 +161,27 @@ namespace WorkTimeCalc.Models
 
             // 3. Unlimited 用スライスセット:
             //    定時エンベロープ内は実効定時区間（分割シフトの隙間・定時休憩）を厳密に保持し、
-            //    定時エンベロープ外の延長部分のみ日内投影休憩を控除する
+            //    定時エンベロープ外の延長部分のみ日内投影休憩を控除する。
+            //    始業日当日（Day 0）は当日休憩 [00:00, 24:00) のみを適用し、翌日以降の休憩は Day 1 以降で適用する。
             var regularEnvelope = new List<RawSpan>(1)
             {
                 new RawSpan(mergedWorking[0].Start, mergedWorking[mergedWorking.Count - 1].End)
             };
             DaySliceSet envelopeSliceSet = BuildSliceSet(regularEnvelope);
+            List<RawSpan> sameDayBreaks = BuildSameDayBreakSpans(inputBreaks);
             List<RawSpan> extensionDailyBreaks = BuildDailyBreakSpans(inputBreaks);
 
             _unlimitedSliceSet = BuildUnlimitedSliceSet(_regularSliceSet, envelopeSliceSet, extensionDailyBreaks);
+            if (AreRawSpanListsEqual(sameDayBreaks, extensionDailyBreaks))
+            {
+                _unlimitedFirstDaySliceSet = _unlimitedSliceSet;
+                HasDistinctFirstDayUnlimitedSlices = false;
+            }
+            else
+            {
+                _unlimitedFirstDaySliceSet = BuildUnlimitedSliceSet(_regularSliceSet, envelopeSliceSet, sameDayBreaks);
+                HasDistinctFirstDayUnlimitedSlices = true;
+            }
         }
 
         /// <summary>
@@ -238,6 +251,10 @@ namespace WorkTimeCalc.Models
         internal DaySliceSet CalendarOvertimeSliceSet => _calendarOvertimeSliceSet;
 
         internal DaySliceSet UnlimitedSliceSet => _unlimitedSliceSet;
+
+        internal DaySliceSet UnlimitedFirstDaySliceSet => _unlimitedFirstDaySliceSet;
+
+        internal bool HasDistinctFirstDayUnlimitedSlices { get; }
 
         internal bool HasUnlimitedNonWorkingDaySlices => _unlimitedSliceSet.NeitherSlices.Length > 0;
 
@@ -559,6 +576,36 @@ namespace WorkTimeCalc.Models
             combined.AddRange(extensionSpans);
 
             return ToWorkTimeRanges(MergeSpans(combined)).ToArray();
+        }
+
+        private static List<RawSpan> BuildSameDayBreakSpans(List<WorkTimeRange> inputBreaks)
+        {
+            if (inputBreaks.Count == 0)
+            {
+                return new List<RawSpan>();
+            }
+
+            var rawBreaks = ToRawSpans(inputBreaks);
+            List<RawSpan> sameDayBreaks = ClipAndShift(rawBreaks, TimeSpan.Zero, TimeFormatHelper.OneDay, TimeSpan.Zero);
+            return MergeSpans(sameDayBreaks);
+        }
+
+        private static bool AreRawSpanListsEqual(List<RawSpan> left, List<RawSpan> right)
+        {
+            if (left.Count != right.Count)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < left.Count; i++)
+            {
+                if (left[i].Start != right[i].Start || left[i].End != right[i].End)
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         private static List<RawSpan> BuildDailyBreakSpans(List<WorkTimeRange> inputBreaks)

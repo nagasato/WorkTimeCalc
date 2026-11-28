@@ -230,8 +230,8 @@ dotnet test src/WorkTimeCalc.slnx -c Release --no-build --verbosity normal
 稼働日判定・稼働日計算は定時ベース（`IsWorkingDay` 等は変更なし）のまま、以下の 2 方式を残業ポリシー `OvertimePolicy` で統一的に扱えるよう拡張しています。
 
 1. **呼び出し時の動的残業（定時のみカレンダーでも利用可能）**:
-   - `OvertimePolicy.MaxPerDay(TimeSpan)`: 各稼働日の定時終了後に指定時間まで残業を動的延長（`DailyWorkSchedule.Breaks` を自動控除）。上限超過分は翌稼働日へ繰り越し。
-   - `OvertimePolicy.Unlimited`: 1 日の上限なしで定時終了後へそのまま延長（`Breaks` は継続適用、非稼働日・始業前開始時は次の定時開始時刻へスナップしてから延長）。
+   - `OvertimePolicy.MaxPerDay(TimeSpan)`: 各稼働日の定時終了後に指定時間まで残業を動的延長（`DailyWorkSchedule.Breaks` を自動控除）。上限超過分は翌稼働日へ繰り越し。休憩時間により終日が覆われて指定上限分の稼働時間を確保できない場合は `InvalidOperationException` をスロー。
+   - `OvertimePolicy.Unlimited`: 1 日の上限なしで定時終了後へそのまま延長（`Breaks` は継続適用、非稼働日・始業前開始時は次の定時開始時刻へスナップしてから延長）。`SubtractWorkingTime` による逆算時は、結果の開始日時が有効な始業時刻以降（および全曜日非稼働カレンダーでの上書き下限以降）であることを検証し、満たす始業開始日時が存在しない場合は `InvalidOperationException` をスロー。
 2. **カレンダー事前定義の残業枠（`DailyWorkSchedule.OvertimePeriods`）**:
    - `WorkCalendarBuilder.WithOvertimeHours` / `AddOvertimeHours` / `AddOvertimePeriod` および `WorkCalendarDefinition.OvertimePeriods`（JSON）で事前定義。
    - `OvertimePolicy.CalendarDefined` 指定時に定時＋残業枠で計算し、`IsOvertime(DateTime)` で事前定義残業帯を判定可能。

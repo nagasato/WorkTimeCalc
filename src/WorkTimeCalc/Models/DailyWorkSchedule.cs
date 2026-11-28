@@ -239,6 +239,8 @@ namespace WorkTimeCalc.Models
 
         internal DaySliceSet UnlimitedSliceSet => _unlimitedSliceSet;
 
+        internal bool HasUnlimitedNonWorkingDaySlices => _unlimitedSliceSet.NeitherSlices.Length > 0;
+
         internal TimeSpan FirstRegularStart { get; }
 
         /// <summary>
@@ -267,7 +269,10 @@ namespace WorkTimeCalc.Models
 
             while (remainingTicks > 0)
             {
-                TimeSpan windowEnd = cursor + windowLength;
+                long ticksBeforeWindow = remainingTicks;
+                TimeSpan windowEnd = TimeSpan.MaxValue - cursor > windowLength
+                    ? cursor + windowLength
+                    : TimeSpan.MaxValue;
                 List<RawSpan> windowBreaks = BuildBreakSpansInWindow(_inputBreaks, cursor, windowEnd);
                 int breakIndex = 0;
 
@@ -299,6 +304,14 @@ namespace WorkTimeCalc.Models
                     dynamicOvertimeSpans.Add(new RawSpan(cursor, nextCursor));
                     cursor = nextCursor;
                     remainingTicks -= takeTicks;
+                }
+
+                if (remainingTicks > 0 &&
+                    ((remainingTicks == ticksBeforeWindow && cursor >= TimeFormatHelper.OneDay) ||
+                     windowEnd == TimeSpan.MaxValue))
+                {
+                    throw new InvalidOperationException(
+                        "休憩時間により終日が覆われているため、指定された残業上限分の稼働時間を確保できません。");
                 }
             }
 

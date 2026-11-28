@@ -520,5 +520,121 @@ namespace WorkTimeCalc.Tests
             Assert.False(cleared.Schedule.HasOvertime);
             Assert.True(cleared.Schedule.HasOvernightSpillover);
         }
+
+        [Fact]
+        public void OvertimePolicy_MaxPerDay_FullDayBreak_ThrowsWhenOvertimeCannotBeAllocated()
+        {
+            // Copilot再レビュー指摘#1: 定時 08:00-17:00・休憩 24:00-48:00 のとき、
+            // 休憩前で収まる MaxPerDay(7h) は完了し、終日休憩に突入する MaxPerDay(8h) は例外で終了すること
+            WorkCalendar cal = WorkCalendar.CreateBuilder()
+                .WithWorkingHours(TimeSpan.FromHours(8), TimeSpan.FromHours(17))
+                .AddBreak(WorkTimeRange.Parse("24:00-48:00"))
+                .Build();
+
+            var monStart = new DateTime(2026, 5, 11, 8, 0, 0);
+            Assert.Equal(
+                new DateTime(2026, 5, 12, 0, 0, 0),
+                cal.AddWorkingTime(monStart, TimeSpan.FromHours(16), OvertimePolicy.MaxPerDay(TimeSpan.FromHours(7))));
+
+            Assert.Throws<InvalidOperationException>(() =>
+                cal.AddWorkingTime(monStart, TimeSpan.FromHours(17), OvertimePolicy.MaxPerDay(TimeSpan.FromHours(8))));
+
+            // 終日休憩で非稼働日スライスが空となる場合、全曜日非稼働カレンダー＋Unlimited でも探索上限で停止すること
+            WorkCalendar allNonWorkingOneOverride = WorkCalendar.CreateBuilder()
+                .WithWorkingHours(TimeSpan.FromHours(8), TimeSpan.FromHours(17))
+                .AddBreak(WorkTimeRange.Parse("24:00-48:00"))
+                .WithNonWorkingDaysOfWeek(
+                    DayOfWeek.Monday,
+                    DayOfWeek.Tuesday,
+                    DayOfWeek.Wednesday,
+                    DayOfWeek.Thursday,
+                    DayOfWeek.Friday,
+                    DayOfWeek.Saturday,
+                    DayOfWeek.Sunday)
+                .WithoutHolidays()
+                .AddWorkingDayOverride(new DateTime(2026, 5, 11), "単日稼働")
+                .Build();
+
+            Assert.Throws<InvalidOperationException>(() =>
+                allNonWorkingOneOverride.AddWorkingTime(monStart, TimeSpan.FromHours(10), OvertimePolicy.Unlimited));
+        }
+
+        [Fact]
+        public void OvertimePolicy_Unlimited_SubtractWorkingTime_ValidatesActiveShiftAnchorAndCalendarBounds()
+        {
+            // Copilot再レビュー指摘#2: Unlimited の逆算で有効な始業開始日時が存在しない場合は例外となること
+            WorkCalendar cal = WorkCalendar.CreateDefault();
+            var mon9am = new DateTime(2026, 5, 11, 9, 0, 0);
+
+            Assert.Equal(
+                new DateTime(2026, 5, 11, 8, 0, 0),
+                cal.SubtractWorkingTime(mon9am, TimeSpan.FromHours(1), OvertimePolicy.Unlimited));
+
+            Assert.Throws<InvalidOperationException>(() =>
+                cal.SubtractWorkingTime(mon9am, TimeSpan.FromHours(2), OvertimePolicy.Unlimited));
+            Assert.Throws<InvalidOperationException>(() =>
+                cal.AddWorkingTime(mon9am, TimeSpan.FromHours(-2), OvertimePolicy.Unlimited));
+
+            // 全曜日非稼働・上書きなしのカレンダーは常に例外
+            WorkCalendar noWorkingDaysCal = WorkCalendar.CreateBuilder()
+                .WithNonWorkingDaysOfWeek(
+                    DayOfWeek.Monday,
+                    DayOfWeek.Tuesday,
+                    DayOfWeek.Wednesday,
+                    DayOfWeek.Thursday,
+                    DayOfWeek.Friday,
+                    DayOfWeek.Saturday,
+                    DayOfWeek.Sunday)
+                .WithoutHolidays()
+                .Build();
+
+            Assert.Throws<InvalidOperationException>(() =>
+                noWorkingDaysCal.SubtractWorkingTime(new DateTime(2026, 5, 11, 19, 0, 0), TimeSpan.FromHours(2), OvertimePolicy.Unlimited));
+
+            // 全曜日非稼働・単日上書きカレンダーは上書き日の始業時刻が下限
+            WorkCalendar singleOverrideCal = WorkCalendar.CreateBuilder()
+                .WithNonWorkingDaysOfWeek(
+                    DayOfWeek.Monday,
+                    DayOfWeek.Tuesday,
+                    DayOfWeek.Wednesday,
+                    DayOfWeek.Thursday,
+                    DayOfWeek.Friday,
+                    DayOfWeek.Saturday,
+                    DayOfWeek.Sunday)
+                .WithoutHolidays()
+                .AddWorkingDayOverride(new DateTime(2026, 5, 11), "単日稼働")
+                .Build();
+
+            var overrideFinish = new DateTime(2026, 5, 11, 19, 0, 0);
+            Assert.Equal(
+                new DateTime(2026, 5, 11, 8, 0, 0),
+                singleOverrideCal.SubtractWorkingTime(overrideFinish, TimeSpan.FromHours(10), OvertimePolicy.Unlimited));
+            Assert.Throws<InvalidOperationException>(() =>
+                singleOverrideCal.SubtractWorkingTime(overrideFinish, TimeSpan.FromHours(11), OvertimePolicy.Unlimited));
+            Assert.Throws<InvalidOperationException>(() =>
+                singleOverrideCal.SubtractWorkingTime(new DateTime(2026, 5, 10, 17, 0, 0), TimeSpan.FromHours(1), OvertimePolicy.Unlimited));
+        }
+
+        [Fact]
+        public void OvertimePolicy_Unlimited_NextDayStartSchedule_AppliesShiftedRegularStartLowerBound()
+        {
+            // Copilot再レビュー指摘#3: 翌日始業スケジュール (26:00-30:00) では前日稼働日でも翌日の 02:00 未満は始業済みとみなさないこと
+            WorkCalendar cal = WorkCalendar.CreateBuilder()
+                .WithSchedule(new DailyWorkSchedule(new[] { WorkTimeRange.Parse("26:00-30:00") }))
+                .Build();
+
+            var tue1am = new DateTime(2026, 5, 12, 1, 0, 0);
+            var tue2am = new DateTime(2026, 5, 12, 2, 0, 0);
+            var tue3am = new DateTime(2026, 5, 12, 3, 0, 0);
+
+            Assert.False(cal.IsWorkingTime(tue1am, OvertimePolicy.Unlimited));
+            Assert.True(cal.IsWorkingTime(tue2am, OvertimePolicy.Unlimited));
+            Assert.Equal(tue2am, cal.GetNextWorkingTime(tue1am, OvertimePolicy.Unlimited));
+            Assert.Equal(tue3am, cal.AddWorkingTime(tue1am, TimeSpan.FromHours(1), OvertimePolicy.Unlimited));
+            Assert.Equal(TimeSpan.FromHours(1), cal.GetWorkingTime(tue1am, tue3am, OvertimePolicy.Unlimited));
+            Assert.Equal(tue2am, cal.SubtractWorkingTime(tue3am, TimeSpan.FromHours(1), OvertimePolicy.Unlimited));
+            Assert.Throws<InvalidOperationException>(() =>
+                cal.SubtractWorkingTime(tue3am, TimeSpan.FromHours(2), OvertimePolicy.Unlimited));
+        }
     }
 }

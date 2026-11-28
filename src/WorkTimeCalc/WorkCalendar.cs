@@ -713,7 +713,11 @@ namespace WorkTimeCalc
                     ? startDateTime
                     : GetNextWorkingTimeCore(startDateTime, Schedule.RegularSliceSet);
 
-                return AddWorkingTimeCore(anchor, duration, Schedule.UnlimitedSliceSet, checkWorkingDayLimits: false);
+                return AddWorkingTimeCore(
+                    anchor,
+                    duration,
+                    Schedule.UnlimitedSliceSet,
+                    checkWorkingDayLimits: !Schedule.HasUnlimitedNonWorkingDaySlices);
             }
 
             DailyWorkSchedule.DaySliceSet sliceSet = ResolveSliceSet(overtimePolicy);
@@ -747,7 +751,7 @@ namespace WorkTimeCalc
 
             if (overtimePolicy.Kind == OvertimePolicyKind.Unlimited)
             {
-                return SubtractWorkingTimeCore(endDateTime, duration, Schedule.UnlimitedSliceSet, checkWorkingDayLimits: false);
+                return SubtractWorkingTimeUnlimited(endDateTime, duration);
             }
 
             DailyWorkSchedule.DaySliceSet sliceSet = ResolveSliceSet(overtimePolicy);
@@ -838,7 +842,10 @@ namespace WorkTimeCalc
                     return GetNextWorkingTimeCore(dateTime, Schedule.RegularSliceSet);
                 }
 
-                return GetNextWorkingTimeCore(dateTime, Schedule.UnlimitedSliceSet, checkWorkingDayLimits: false);
+                return GetNextWorkingTimeCore(
+                    dateTime,
+                    Schedule.UnlimitedSliceSet,
+                    checkWorkingDayLimits: !Schedule.HasUnlimitedNonWorkingDaySlices);
             }
 
             DailyWorkSchedule.DaySliceSet sliceSet = ResolveSliceSet(overtimePolicy);
@@ -862,7 +869,10 @@ namespace WorkTimeCalc
                     return GetPreviousWorkingTimeCore(dateTime, Schedule.RegularSliceSet);
                 }
 
-                return GetPreviousWorkingTimeCore(dateTime, Schedule.UnlimitedSliceSet, checkWorkingDayLimits: false);
+                return GetPreviousWorkingTimeCore(
+                    dateTime,
+                    Schedule.UnlimitedSliceSet,
+                    checkWorkingDayLimits: !Schedule.HasUnlimitedNonWorkingDaySlices);
             }
 
             DailyWorkSchedule.DaySliceSet sliceSet = ResolveSliceSet(overtimePolicy);
@@ -977,8 +987,52 @@ namespace WorkTimeCalc
         {
             DateTime day = dateTime.Date;
             TimeSpan tod = dateTime.TimeOfDay;
+            TimeSpan previousShiftStartOnDay = Schedule.FirstRegularStart - TimeFormatHelper.OneDay;
             return (IsWorkingDay(day) && tod >= Schedule.FirstRegularStart) ||
-                   (day > MinSearchDate && IsWorkingDay(day.AddDays(-1)) && Schedule.HasOvernightSpillover);
+                   (day > MinSearchDate &&
+                    IsWorkingDay(day.AddDays(-1)) &&
+                    Schedule.HasOvernightSpillover &&
+                    tod >= previousShiftStartOnDay);
+        }
+
+        private DateTime SubtractWorkingTimeUnlimited(DateTime endDateTime, TimeSpan duration)
+        {
+            DateTime? minStartAnchor = null;
+            if (_allSevenDaysNonWorking)
+            {
+                if (!_minWorkingOverrideDate.HasValue)
+                {
+                    throw new InvalidOperationException("すべての曜日が非稼働に設定されており、稼働日の上書きもないため稼働時間を特定できません。");
+                }
+
+                DateTime minOverride = _minWorkingOverrideDate.Value;
+                if (minOverride.Ticks > DateTime.MaxValue.Ticks - Schedule.FirstRegularStart.Ticks)
+                {
+                    throw new InvalidOperationException("指定された終了日時と稼働時間を満たす有効な始業開始日時が存在しません。");
+                }
+
+                DateTime earliestStart = DateTime.SpecifyKind(minOverride.Add(Schedule.FirstRegularStart), endDateTime.Kind);
+                if (endDateTime <= earliestStart)
+                {
+                    throw new InvalidOperationException("指定日時以前に十分な稼働時間が存在しないため、計算を完了できません。");
+                }
+
+                minStartAnchor = earliestStart;
+            }
+
+            DateTime candidate = SubtractWorkingTimeCore(
+                endDateTime,
+                duration,
+                Schedule.UnlimitedSliceSet,
+                checkWorkingDayLimits: !Schedule.HasUnlimitedNonWorkingDaySlices,
+                minBoundaryDateTime: minStartAnchor);
+
+            if (!IsInOrAfterActiveShift(candidate))
+            {
+                throw new InvalidOperationException("指定された終了日時と稼働時間を満たす有効な始業開始日時が存在しません。");
+            }
+
+            return candidate;
         }
 
         private bool TryFindUnlimitedAnchor(DateTime startDateTime, DateTime endDateTime, out DateTime anchor)
@@ -1114,7 +1168,8 @@ namespace WorkTimeCalc
             DateTime endDateTime,
             TimeSpan duration,
             DailyWorkSchedule.DaySliceSet sliceSet,
-            bool checkWorkingDayLimits = true)
+            bool checkWorkingDayLimits = true,
+            DateTime? minBoundaryDateTime = null)
         {
             long remainingTicks = duration.Ticks;
             DateTime currentDay = endDateTime.Date;
@@ -1128,6 +1183,11 @@ namespace WorkTimeCalc
             int emptyDays = 0;
             while (true)
             {
+                if (minBoundaryDateTime.HasValue && currentDay < minBoundaryDateTime.Value.Date)
+                {
+                    throw new InvalidOperationException("指定日時以前に十分な稼働時間が存在しないため、計算を完了できません。");
+                }
+
                 WorkTimeRange[] slices = GetSlicesForDate(currentDay, sliceSet);
                 bool hadSliceBeforeCursor = false;
 
@@ -1146,7 +1206,13 @@ namespace WorkTimeCalc
                     if (remainingTicks <= availableTicks)
                     {
                         TimeSpan resultOffset = effectiveEnd - TimeSpan.FromTicks(remainingTicks);
-                        return DateTime.SpecifyKind(currentDay.Add(resultOffset), endDateTime.Kind);
+                        DateTime candidate = DateTime.SpecifyKind(currentDay.Add(resultOffset), endDateTime.Kind);
+                        if (minBoundaryDateTime.HasValue && candidate < minBoundaryDateTime.Value)
+                        {
+                            throw new InvalidOperationException("指定日時以前に十分な稼働時間が存在しないため、計算を完了できません。");
+                        }
+
+                        return candidate;
                     }
 
                     remainingTicks -= availableTicks;

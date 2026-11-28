@@ -224,6 +224,7 @@ namespace WorkTimeCalc
         /// <param name="duration">加算する実稼働時間（負値で逆算、0 で startDateTime を返却）。</param>
         /// <param name="overtimePolicy">残業の扱い方を指定するポリシー。</param>
         /// <returns>算出された完了日時。</returns>
+        /// <exception cref="InvalidOperationException"><see cref="OvertimePolicyKind.MaxPerDay"/> 指定時に休憩で終日が覆われ残業上限分の時間を確保できない場合、または稼働日が存在しない場合にスローされます。</exception>
         DateTime AddWorkingTime(DateTime startDateTime, TimeSpan duration, OvertimePolicy overtimePolicy);
 
         /// <summary>
@@ -233,6 +234,7 @@ namespace WorkTimeCalc
         /// <param name="duration">減算する実稼働時間（負値で未来方向へ加算、0 で endDateTime を返却）。</param>
         /// <param name="overtimePolicy">残業の扱い方を指定するポリシー。</param>
         /// <returns>算出された開始日時。</returns>
+        /// <exception cref="InvalidOperationException"><see cref="OvertimePolicy.Unlimited"/> 指定時に条件を満たす有効な始業開始日時（稼働日の始業時刻以降）が存在しない場合や、稼働日が存在しない場合にスローされます。</exception>
         DateTime SubtractWorkingTime(DateTime endDateTime, TimeSpan duration, OvertimePolicy overtimePolicy);
 
         /// <summary>

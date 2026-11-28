@@ -152,54 +152,34 @@ namespace WorkTimeCalc
             }
 
             DailyWorkSchedule schedule;
-            if (definition.WorkingPeriods == null && definition.Breaks == null)
+            if (definition.WorkingPeriods == null && definition.Breaks == null && definition.OvertimePeriods == null)
             {
                 schedule = DailyWorkSchedule.StandardDayShift;
             }
             else
             {
-                List<WorkTimeRange> periods;
-                if (definition.WorkingPeriods == null)
-                {
-                    periods = new List<WorkTimeRange>
-                    {
-                        new WorkTimeRange(TimeSpan.FromHours(8), TimeSpan.FromHours(17))
-                    };
-                }
-                else
-                {
-                    periods = new List<WorkTimeRange>(definition.WorkingPeriods.Count);
-                    foreach (TimeRangeDefinition item in definition.WorkingPeriods)
-                    {
-                        if (item == null)
-                        {
-                            throw new ArgumentException("稼働時間帯定義に null 要素を含めることはできません。", nameof(definition));
-                        }
+                List<WorkTimeRange> periods = ParseRangeList(
+                    definition.WorkingPeriods,
+                    "稼働時間帯定義に null 要素を含めることはできません。",
+                    nameof(definition)) ??
+                    new List<WorkTimeRange> { new WorkTimeRange(TimeSpan.FromHours(8), TimeSpan.FromHours(17)) };
 
-                        TimeSpan start = TimeFormatHelper.ParseShiftTime(item.Start);
-                        TimeSpan end = TimeFormatHelper.ParseShiftTime(item.End);
-                        periods.Add(WorkTimeRange.FromClock(start, end));
-                    }
+                List<WorkTimeRange>? breaks = ParseRangeList(
+                    definition.Breaks,
+                    "休憩時間帯定義に null 要素を含めることはできません。",
+                    nameof(definition));
+
+                if (definition.WorkingPeriods == null && breaks == null)
+                {
+                    breaks = new List<WorkTimeRange> { new WorkTimeRange(TimeSpan.FromHours(12), TimeSpan.FromHours(13)) };
                 }
 
-                List<WorkTimeRange>? breaks = null;
-                if (definition.Breaks != null)
-                {
-                    breaks = new List<WorkTimeRange>(definition.Breaks.Count);
-                    foreach (TimeRangeDefinition item in definition.Breaks)
-                    {
-                        if (item == null)
-                        {
-                            throw new ArgumentException("休憩時間帯定義に null 要素を含めることはできません。", nameof(definition));
-                        }
+                List<WorkTimeRange>? overtimePeriods = ParseRangeList(
+                    definition.OvertimePeriods,
+                    "残業時間帯定義に null 要素を含めることはできません。",
+                    nameof(definition));
 
-                        TimeSpan start = TimeFormatHelper.ParseShiftTime(item.Start);
-                        TimeSpan end = TimeFormatHelper.ParseShiftTime(item.End);
-                        breaks.Add(WorkTimeRange.FromClock(start, end));
-                    }
-                }
-
-                schedule = new DailyWorkSchedule(periods, breaks);
+                schedule = new DailyWorkSchedule(periods, breaks, overtimePeriods);
             }
 
             IEnumerable<DayOfWeek> nonWorkingDays = definition.NonWorkingDaysOfWeek ??
@@ -308,6 +288,20 @@ namespace WorkTimeCalc
                 });
             }
 
+            List<TimeRangeDefinition>? overtimePeriods = null;
+            if (Schedule.OvertimePeriods.Count > 0)
+            {
+                overtimePeriods = new List<TimeRangeDefinition>(Schedule.OvertimePeriods.Count);
+                foreach (WorkTimeRange ot in Schedule.OvertimePeriods)
+                {
+                    overtimePeriods.Add(new TimeRangeDefinition
+                    {
+                        Start = TimeFormatHelper.FormatShiftTime(ot.Start),
+                        End = TimeFormatHelper.FormatShiftTime(ot.End)
+                    });
+                }
+            }
+
             var nonWorkingWeekdays = new List<DayOfWeek>(NonWorkingDaysOfWeek);
 
             List<RecurringHolidayDefinition>? recurringList = null;
@@ -367,6 +361,7 @@ namespace WorkTimeCalc
                 Name = Name,
                 WorkingPeriods = workingPeriods,
                 Breaks = breaks,
+                OvertimePeriods = overtimePeriods,
                 NonWorkingDaysOfWeek = nonWorkingWeekdays,
                 UseJapanHolidays = _useJapanHolidays,
                 RecurringNonWorkingDays = recurringList,
@@ -643,27 +638,69 @@ namespace WorkTimeCalc
         {
             return GetShiftIntervals(workingDate.ToDateTime(TimeOnly.MinValue));
         }
+
+        /// <inheritdoc />
+        public IReadOnlyList<DateTimeInterval> GetShiftIntervals(DateOnly workingDate, OvertimePolicy overtimePolicy)
+        {
+            return GetShiftIntervals(workingDate.ToDateTime(TimeOnly.MinValue), overtimePolicy);
+        }
 #endif
 
         /// <inheritdoc />
         public bool IsWorkingTime(DateTime dateTime)
         {
-            WorkTimeRange[] slices = GetSlicesForDate(dateTime.Date);
-            TimeSpan tod = dateTime.TimeOfDay;
-            for (int i = 0; i < slices.Length; i++)
+            return IsWorkingTime(dateTime, OvertimePolicy.None);
+        }
+
+        /// <inheritdoc />
+        public bool IsOvertime(DateTime dateTime)
+        {
+            if (!Schedule.HasOvertime)
             {
-                if (slices[i].Contains(tod))
-                {
-                    return true;
-                }
+                return false;
             }
 
-            return false;
+            if (IsWorkingTimeCore(dateTime, Schedule.RegularSliceSet))
+            {
+                return false;
+            }
+
+            return IsWorkingTimeCore(dateTime, Schedule.OvertimeOnlySliceSet);
+        }
+
+        /// <inheritdoc />
+        public bool IsWorkingTime(DateTime dateTime, OvertimePolicy overtimePolicy)
+        {
+            ValidatePolicy(overtimePolicy);
+            if (overtimePolicy.Kind == OvertimePolicyKind.Unlimited)
+            {
+                if (!IsInOrAfterActiveShift(dateTime))
+                {
+                    return false;
+                }
+
+                DateTime? firstDay = GetUnlimitedFirstDayOverride(dateTime);
+                return IsWorkingTimeCore(
+                    dateTime,
+                    Schedule.UnlimitedSliceSet,
+                    firstDay,
+                    Schedule.UnlimitedFirstDaySliceSet);
+            }
+
+            DailyWorkSchedule.DaySliceSet sliceSet = ResolveSliceSet(overtimePolicy);
+            return IsWorkingTimeCore(dateTime, sliceSet);
         }
 
         /// <inheritdoc />
         public DateTime AddWorkingTime(DateTime startDateTime, TimeSpan duration)
         {
+            return AddWorkingTime(startDateTime, duration, OvertimePolicy.None);
+        }
+
+        /// <inheritdoc />
+        public DateTime AddWorkingTime(DateTime startDateTime, TimeSpan duration, OvertimePolicy overtimePolicy)
+        {
+            ValidatePolicy(overtimePolicy);
             if (duration == TimeSpan.Zero)
             {
                 return startDateTime;
@@ -676,19 +713,607 @@ namespace WorkTimeCalc
                     throw new ArgumentOutOfRangeException(nameof(duration), duration, "TimeSpan.MinValue は指定できません。");
                 }
 
-                return SubtractWorkingTime(startDateTime, duration.Negate());
+                return SubtractWorkingTime(startDateTime, duration.Negate(), overtimePolicy);
             }
 
-            long remainingTicks = duration.Ticks;
-            DateTime currentDay = startDateTime.Date;
-            TimeSpan currentTod = startDateTime.TimeOfDay;
+            if (overtimePolicy.Kind == OvertimePolicyKind.Unlimited)
+            {
+                DateTime anchor = IsInOrAfterActiveShift(startDateTime)
+                    ? startDateTime
+                    : GetNextWorkingTimeCore(startDateTime, Schedule.RegularSliceSet);
 
-            EnsureCanMoveTimeInDirection(currentDay, direction: 1);
+                DateTime? firstDay = GetUnlimitedFirstDayOverride(anchor);
+                return AddWorkingTimeCore(
+                    anchor,
+                    duration,
+                    Schedule.UnlimitedSliceSet,
+                    checkWorkingDayLimits: !Schedule.HasUnlimitedNonWorkingDaySlices,
+                    firstDayOverrideDate: firstDay,
+                    firstDayOverrideSliceSet: Schedule.UnlimitedFirstDaySliceSet);
+            }
+
+            DailyWorkSchedule.DaySliceSet sliceSet = ResolveSliceSet(overtimePolicy);
+            return AddWorkingTimeCore(startDateTime, duration, sliceSet, checkWorkingDayLimits: true);
+        }
+
+        /// <inheritdoc />
+        public DateTime SubtractWorkingTime(DateTime endDateTime, TimeSpan duration)
+        {
+            return SubtractWorkingTime(endDateTime, duration, OvertimePolicy.None);
+        }
+
+        /// <inheritdoc />
+        public DateTime SubtractWorkingTime(DateTime endDateTime, TimeSpan duration, OvertimePolicy overtimePolicy)
+        {
+            ValidatePolicy(overtimePolicy);
+            if (duration == TimeSpan.Zero)
+            {
+                return endDateTime;
+            }
+
+            if (duration < TimeSpan.Zero)
+            {
+                if (duration == TimeSpan.MinValue)
+                {
+                    throw new ArgumentOutOfRangeException(nameof(duration), duration, "TimeSpan.MinValue は指定できません。");
+                }
+
+                return AddWorkingTime(endDateTime, duration.Negate(), overtimePolicy);
+            }
+
+            if (overtimePolicy.Kind == OvertimePolicyKind.Unlimited)
+            {
+                return SubtractWorkingTimeUnlimited(endDateTime, duration);
+            }
+
+            DailyWorkSchedule.DaySliceSet sliceSet = ResolveSliceSet(overtimePolicy);
+            return SubtractWorkingTimeCore(endDateTime, duration, sliceSet, checkWorkingDayLimits: true);
+        }
+
+        /// <inheritdoc />
+        public TimeSpan GetWorkingTime(DateTime startDateTime, DateTime endDateTime)
+        {
+            return GetWorkingTime(startDateTime, endDateTime, OvertimePolicy.None);
+        }
+
+        /// <inheritdoc />
+        public TimeSpan GetWorkingTime(DateTime startDateTime, DateTime endDateTime, OvertimePolicy overtimePolicy)
+        {
+            ValidatePolicy(overtimePolicy);
+            if (startDateTime == endDateTime)
+            {
+                return TimeSpan.Zero;
+            }
+
+            if (endDateTime < startDateTime)
+            {
+                return GetWorkingTime(endDateTime, startDateTime, overtimePolicy).Negate();
+            }
+
+            if (overtimePolicy.Kind == OvertimePolicyKind.Unlimited)
+            {
+                if (!TryFindUnlimitedAnchor(startDateTime, endDateTime, out DateTime anchor))
+                {
+                    return TimeSpan.Zero;
+                }
+
+                DateTime? firstDay = GetUnlimitedFirstDayOverride(anchor);
+                return GetWorkingTimeCore(
+                    anchor,
+                    endDateTime,
+                    Schedule.UnlimitedSliceSet,
+                    firstDay,
+                    Schedule.UnlimitedFirstDaySliceSet);
+            }
+
+            DailyWorkSchedule.DaySliceSet sliceSet = ResolveSliceSet(overtimePolicy);
+            return GetWorkingTimeCore(startDateTime, endDateTime, sliceSet);
+        }
+
+        /// <inheritdoc />
+        public WorkingTimeBreakdown GetWorkingTimeBreakdown(DateTime startDateTime, DateTime endDateTime)
+        {
+            return GetWorkingTimeBreakdown(startDateTime, endDateTime, OvertimePolicy.CalendarDefined);
+        }
+
+        /// <inheritdoc />
+        public WorkingTimeBreakdown GetWorkingTimeBreakdown(
+            DateTime startDateTime,
+            DateTime endDateTime,
+            OvertimePolicy overtimePolicy)
+        {
+            ValidatePolicy(overtimePolicy);
+            if (startDateTime == endDateTime)
+            {
+                return WorkingTimeBreakdown.Zero;
+            }
+
+            if (endDateTime < startDateTime)
+            {
+                return GetWorkingTimeBreakdown(endDateTime, startDateTime, overtimePolicy).Negate();
+            }
+
+            TimeSpan regular = GetWorkingTimeCore(startDateTime, endDateTime, Schedule.RegularSliceSet);
+            if (overtimePolicy.Kind == OvertimePolicyKind.None)
+            {
+                return new WorkingTimeBreakdown(regular, TimeSpan.Zero);
+            }
+
+            TimeSpan total = GetWorkingTime(startDateTime, endDateTime, overtimePolicy);
+            return new WorkingTimeBreakdown(regular, total - regular);
+        }
+
+        /// <inheritdoc />
+        public DateTime GetNextWorkingTime(DateTime dateTime)
+        {
+            return GetNextWorkingTime(dateTime, OvertimePolicy.None);
+        }
+
+        /// <inheritdoc />
+        public DateTime GetNextWorkingTime(DateTime dateTime, OvertimePolicy overtimePolicy)
+        {
+            ValidatePolicy(overtimePolicy);
+            if (overtimePolicy.Kind == OvertimePolicyKind.Unlimited)
+            {
+                if (!IsInOrAfterActiveShift(dateTime))
+                {
+                    return GetNextWorkingTimeCore(dateTime, Schedule.RegularSliceSet);
+                }
+
+                DateTime? firstDay = GetUnlimitedFirstDayOverride(dateTime);
+                return GetNextWorkingTimeCore(
+                    dateTime,
+                    Schedule.UnlimitedSliceSet,
+                    checkWorkingDayLimits: !Schedule.HasUnlimitedNonWorkingDaySlices,
+                    firstDayOverrideDate: firstDay,
+                    firstDayOverrideSliceSet: Schedule.UnlimitedFirstDaySliceSet);
+            }
+
+            DailyWorkSchedule.DaySliceSet sliceSet = ResolveSliceSet(overtimePolicy);
+            return GetNextWorkingTimeCore(dateTime, sliceSet);
+        }
+
+        /// <inheritdoc />
+        public DateTime GetPreviousWorkingTime(DateTime dateTime)
+        {
+            return GetPreviousWorkingTime(dateTime, OvertimePolicy.None);
+        }
+
+        /// <inheritdoc />
+        public DateTime GetPreviousWorkingTime(DateTime dateTime, OvertimePolicy overtimePolicy)
+        {
+            ValidatePolicy(overtimePolicy);
+            if (overtimePolicy.Kind == OvertimePolicyKind.Unlimited)
+            {
+                if (!IsInOrAfterActiveShift(dateTime))
+                {
+                    return GetPreviousWorkingTimeCore(dateTime, Schedule.RegularSliceSet);
+                }
+
+                DateTime? firstDay = GetUnlimitedFirstDayOverride(dateTime);
+                return GetPreviousWorkingTimeCore(
+                    dateTime,
+                    Schedule.UnlimitedSliceSet,
+                    checkWorkingDayLimits: !Schedule.HasUnlimitedNonWorkingDaySlices,
+                    firstDayOverrideDate: firstDay,
+                    firstDayOverrideSliceSet: Schedule.UnlimitedFirstDaySliceSet);
+            }
+
+            DailyWorkSchedule.DaySliceSet sliceSet = ResolveSliceSet(overtimePolicy);
+            return GetPreviousWorkingTimeCore(dateTime, sliceSet);
+        }
+
+        /// <inheritdoc />
+        public IReadOnlyList<DateTimeInterval> GetWorkingIntervals(DateTime startDateTime, DateTime endDateTime)
+        {
+            return GetWorkingIntervals(startDateTime, endDateTime, OvertimePolicy.None);
+        }
+
+        /// <inheritdoc />
+        public IReadOnlyList<DateTimeInterval> GetWorkingIntervals(
+            DateTime startDateTime,
+            DateTime endDateTime,
+            OvertimePolicy overtimePolicy)
+        {
+            ValidatePolicy(overtimePolicy);
+            if (endDateTime < startDateTime)
+            {
+                throw new ArgumentOutOfRangeException(nameof(endDateTime), endDateTime, "終了日時は開始日時以降である必要があります。");
+            }
+
+            if (endDateTime == startDateTime)
+            {
+                return Array.Empty<DateTimeInterval>();
+            }
+
+            if (overtimePolicy.Kind == OvertimePolicyKind.Unlimited)
+            {
+                if (!TryFindUnlimitedAnchor(startDateTime, endDateTime, out DateTime anchor))
+                {
+                    return Array.Empty<DateTimeInterval>();
+                }
+
+                DateTime? firstDay = GetUnlimitedFirstDayOverride(anchor);
+                return GetWorkingIntervalsCore(
+                    anchor,
+                    endDateTime,
+                    Schedule.UnlimitedSliceSet,
+                    firstDay,
+                    Schedule.UnlimitedFirstDaySliceSet);
+            }
+
+            DailyWorkSchedule.DaySliceSet sliceSet = ResolveSliceSet(overtimePolicy);
+            return GetWorkingIntervalsCore(startDateTime, endDateTime, sliceSet);
+        }
+
+        /// <inheritdoc />
+        public IReadOnlyList<DateTimeInterval> GetShiftIntervals(DateTime workingDate)
+        {
+            return GetShiftIntervals(workingDate, OvertimePolicy.None);
+        }
+
+        /// <inheritdoc />
+        public IReadOnlyList<DateTimeInterval> GetShiftIntervals(DateTime workingDate, OvertimePolicy overtimePolicy)
+        {
+            ValidatePolicy(overtimePolicy);
+            if (overtimePolicy.Kind == OvertimePolicyKind.Unlimited)
+            {
+                throw new ArgumentException(
+                    "OvertimePolicy.Unlimited は上限なしのため、有限のシフト区間を算出できません。",
+                    nameof(overtimePolicy));
+            }
+
+            DateTime target = workingDate.Date;
+            if (!IsWorkingDay(target))
+            {
+                return Array.Empty<DateTimeInterval>();
+            }
+
+            DailyWorkSchedule.DaySliceSet sliceSet = ResolveSliceSet(overtimePolicy);
+            IReadOnlyList<WorkTimeRange> effectiveRanges = sliceSet.EffectiveRanges;
+            DateTimeKind kind = workingDate.Kind;
+
+            if (effectiveRanges.Count > 0)
+            {
+                var result = new DateTimeInterval[effectiveRanges.Count];
+                for (int i = 0; i < effectiveRanges.Count; i++)
+                {
+                    WorkTimeRange range = effectiveRanges[i];
+                    result[i] = new DateTimeInterval(
+                        DateTime.SpecifyKind(target.Add(range.Start), kind),
+                        DateTime.SpecifyKind(target.Add(range.End), kind));
+                }
+
+                return new ReadOnlyCollection<DateTimeInterval>(result);
+            }
+
+            DailyWorkSchedule.RawSpan[] spans = sliceSet.EffectiveSpans;
+            var spanResult = new DateTimeInterval[spans.Length];
+            for (int i = 0; i < spans.Length; i++)
+            {
+                DailyWorkSchedule.RawSpan span = spans[i];
+                spanResult[i] = new DateTimeInterval(
+                    DateTime.SpecifyKind(target.Add(span.Start), kind),
+                    DateTime.SpecifyKind(target.Add(span.End), kind));
+            }
+
+            return new ReadOnlyCollection<DateTimeInterval>(spanResult);
+        }
+
+        private static void ValidatePolicy(OvertimePolicy overtimePolicy)
+        {
+            switch (overtimePolicy.Kind)
+            {
+                case OvertimePolicyKind.None:
+                case OvertimePolicyKind.CalendarDefined:
+                case OvertimePolicyKind.MaxPerDay:
+                case OvertimePolicyKind.Unlimited:
+                    return;
+                default:
+                    throw new ArgumentOutOfRangeException(
+                        nameof(overtimePolicy),
+                        overtimePolicy.Kind,
+                        "不正な OvertimePolicyKind が指定されました。");
+            }
+        }
+
+        private DailyWorkSchedule.DaySliceSet ResolveSliceSet(OvertimePolicy overtimePolicy)
+        {
+            return overtimePolicy.Kind switch
+            {
+                OvertimePolicyKind.None => Schedule.RegularSliceSet,
+                OvertimePolicyKind.CalendarDefined => Schedule.CalendarOvertimeSliceSet,
+                OvertimePolicyKind.MaxPerDay => Schedule.BuildDynamicOvertimeSliceSet(overtimePolicy.MaxDurationPerDay ?? TimeSpan.Zero),
+                _ => throw new ArgumentOutOfRangeException(nameof(overtimePolicy))
+            };
+        }
+
+        private bool IsInOrAfterActiveShift(DateTime dateTime)
+        {
+            DateTime day = dateTime.Date;
+            TimeSpan tod = dateTime.TimeOfDay;
+            TimeSpan previousShiftStartOnDay = Schedule.FirstRegularStart - TimeFormatHelper.OneDay;
+            return (IsWorkingDay(day) && tod >= Schedule.FirstRegularStart) ||
+                   (day > MinSearchDate &&
+                    IsWorkingDay(day.AddDays(-1)) &&
+                    Schedule.HasOvernightSpillover &&
+                    tod >= previousShiftStartOnDay);
+        }
+
+        private DateTime GetUnlimitedOriginDay(DateTime anchor)
+        {
+            DateTime day = anchor.Date;
+            TimeSpan tod = anchor.TimeOfDay;
+            if (IsWorkingDay(day) && tod >= Schedule.FirstRegularStart)
+            {
+                return day;
+            }
+
+            return day.AddDays(-1);
+        }
+
+        private DateTime? GetUnlimitedFirstDayOverride(DateTime anchor)
+        {
+            return Schedule.HasDistinctFirstDayUnlimitedSlices
+                ? GetUnlimitedOriginDay(anchor)
+                : (DateTime?)null;
+        }
+
+        private DateTime SubtractWorkingTimeUnlimited(DateTime endDateTime, TimeSpan duration)
+        {
+            DateTime? minStartAnchor = null;
+            if (_allSevenDaysNonWorking)
+            {
+                if (!_minWorkingOverrideDate.HasValue)
+                {
+                    throw new InvalidOperationException("すべての曜日が非稼働に設定されており、稼働日の上書きもないため稼働時間を特定できません。");
+                }
+
+                DateTime minOverride = _minWorkingOverrideDate.Value;
+                if (minOverride.Ticks > DateTime.MaxValue.Ticks - Schedule.FirstRegularStart.Ticks)
+                {
+                    throw new InvalidOperationException("指定された終了日時と稼働時間を満たす有効な始業開始日時が存在しません。");
+                }
+
+                DateTime earliestStart = DateTime.SpecifyKind(minOverride.Add(Schedule.FirstRegularStart), endDateTime.Kind);
+                if (endDateTime <= earliestStart)
+                {
+                    throw new InvalidOperationException("指定日時以前に十分な稼働時間が存在しないため、計算を完了できません。");
+                }
+
+                minStartAnchor = earliestStart;
+            }
+
+            if (Schedule.HasDistinctFirstDayUnlimitedSlices)
+            {
+                return SubtractWorkingTimeUnlimitedWithDistinctFirstDay(endDateTime, duration, minStartAnchor);
+            }
+
+            DateTime candidate = SubtractWorkingTimeCore(
+                endDateTime,
+                duration,
+                Schedule.UnlimitedSliceSet,
+                checkWorkingDayLimits: !Schedule.HasUnlimitedNonWorkingDaySlices,
+                minBoundaryDateTime: minStartAnchor);
+
+            if (!IsInOrAfterActiveShift(candidate))
+            {
+                throw new InvalidOperationException("指定された終了日時と稼働時間を満たす有効な始業開始日時が存在しません。");
+            }
+
+            return candidate;
+        }
+
+        private DateTime SubtractWorkingTimeUnlimitedWithDistinctFirstDay(
+            DateTime endDateTime,
+            TimeSpan duration,
+            DateTime? minStartAnchor)
+        {
+            long remainingTicks = duration.Ticks;
+            DateTime currentDay = endDateTime.Date;
+            TimeSpan currentTod = endDateTime.TimeOfDay;
+            bool checkWorkingDayLimits = !Schedule.HasUnlimitedNonWorkingDaySlices;
+
+            if (checkWorkingDayLimits)
+            {
+                EnsureCanMoveTimeInDirection(currentDay, direction: -1, Schedule.UnlimitedSliceSet.MaxSpilloverDays);
+            }
 
             int emptyDays = 0;
             while (true)
             {
-                WorkTimeRange[] slices = GetSlicesForDate(currentDay);
+                if (minStartAnchor.HasValue && currentDay < minStartAnchor.Value.Date)
+                {
+                    throw new InvalidOperationException("指定日時以前に十分な稼働時間が存在しないため、計算を完了できません。");
+                }
+
+                // 1. 当日を始業日（Day 0）とみなして FirstRegularStart 以降に収まるか試行
+                if (IsWorkingDay(currentDay) && Schedule.FirstRegularStart < TimeFormatHelper.OneDay)
+                {
+                    TimeSpan minTod = Schedule.FirstRegularStart;
+                    if (minStartAnchor.HasValue &&
+                        currentDay == minStartAnchor.Value.Date &&
+                        minStartAnchor.Value.TimeOfDay > minTod)
+                    {
+                        minTod = minStartAnchor.Value.TimeOfDay;
+                    }
+
+                    if (currentTod > minTod)
+                    {
+                        WorkTimeRange[] firstDaySlices = GetSlicesForDate(currentDay, Schedule.UnlimitedFirstDaySliceSet);
+                        long probeRemaining = remainingTicks;
+
+                        for (int i = firstDaySlices.Length - 1; i >= 0; i--)
+                        {
+                            WorkTimeRange slice = firstDaySlices[i];
+                            if (slice.Start >= currentTod)
+                            {
+                                continue;
+                            }
+
+                            if (slice.End <= minTod)
+                            {
+                                break;
+                            }
+
+                            TimeSpan effectiveStart = slice.Start > minTod ? slice.Start : minTod;
+                            TimeSpan effectiveEnd = slice.End < currentTod ? slice.End : currentTod;
+                            long availableTicks = (effectiveEnd - effectiveStart).Ticks;
+
+                            if (probeRemaining <= availableTicks)
+                            {
+                                TimeSpan resultOffset = effectiveEnd - TimeSpan.FromTicks(probeRemaining);
+                                return DateTime.SpecifyKind(currentDay.Add(resultOffset), endDateTime.Kind);
+                            }
+
+                            probeRemaining -= availableTicks;
+                        }
+                    }
+                }
+
+                // 2. Day 0 内に収まらない場合は Day >= 1 として翌日以降の休憩を含むスライスで消化
+                WorkTimeRange[] slices = GetSlicesForDate(currentDay, Schedule.UnlimitedSliceSet);
+                bool hadSliceBeforeCursor = false;
+
+                for (int i = slices.Length - 1; i >= 0; i--)
+                {
+                    WorkTimeRange slice = slices[i];
+                    if (slice.Start >= currentTod)
+                    {
+                        continue;
+                    }
+
+                    hadSliceBeforeCursor = true;
+                    TimeSpan effectiveEnd = slice.End < currentTod ? slice.End : currentTod;
+                    long availableTicks = (effectiveEnd - slice.Start).Ticks;
+
+                    if (remainingTicks <= availableTicks)
+                    {
+                        TimeSpan resultOffset = effectiveEnd - TimeSpan.FromTicks(remainingTicks);
+                        DateTime candidate = DateTime.SpecifyKind(currentDay.Add(resultOffset), endDateTime.Kind);
+                        if (minStartAnchor.HasValue && candidate < minStartAnchor.Value)
+                        {
+                            throw new InvalidOperationException("指定日時以前に十分な稼働時間が存在しないため、計算を完了できません。");
+                        }
+
+                        if (!IsInOrAfterActiveShift(candidate))
+                        {
+                            throw new InvalidOperationException("指定された終了日時と稼働時間を満たす有効な始業開始日時が存在しません。");
+                        }
+
+                        return candidate;
+                    }
+
+                    remainingTicks -= availableTicks;
+                }
+
+                if (checkWorkingDayLimits)
+                {
+                    if (hadSliceBeforeCursor)
+                    {
+                        emptyDays = 0;
+                    }
+                    else
+                    {
+                        emptyDays++;
+                        CheckTimeSearchLimit(currentDay, direction: -1, emptyDays, Schedule.UnlimitedSliceSet.MaxSpilloverDays);
+                    }
+                }
+
+                if (currentDay <= MinSearchDate)
+                {
+                    throw new ArgumentOutOfRangeException(nameof(duration), "計算結果が DateTime.MinValue を下回りました。");
+                }
+
+                currentDay = currentDay.AddDays(-1);
+                currentTod = TimeFormatHelper.OneDay;
+            }
+        }
+
+        private bool TryFindUnlimitedAnchor(DateTime startDateTime, DateTime endDateTime, out DateTime anchor)
+        {
+            if (IsInOrAfterActiveShift(startDateTime))
+            {
+                anchor = startDateTime;
+                return anchor < endDateTime;
+            }
+
+            DateTime startDay = startDateTime.Date;
+            DateTime endDay = endDateTime.Date;
+            for (DateTime day = startDay; ; day = day.AddDays(1))
+            {
+                TimeSpan windowStart = day == startDay ? startDateTime.TimeOfDay : TimeSpan.Zero;
+                WorkTimeRange[] slices = GetSlicesForDate(day, Schedule.RegularSliceSet);
+                for (int i = 0; i < slices.Length; i++)
+                {
+                    WorkTimeRange slice = slices[i];
+                    if (slice.End <= windowStart)
+                    {
+                        continue;
+                    }
+
+                    TimeSpan effectiveStart = slice.Start > windowStart ? slice.Start : windowStart;
+                    DateTime candidate = DateTime.SpecifyKind(day.Add(effectiveStart), startDateTime.Kind);
+                    if (candidate < endDateTime)
+                    {
+                        anchor = candidate;
+                        return true;
+                    }
+
+                    anchor = default;
+                    return false;
+                }
+
+                if (day >= endDay)
+                {
+                    break;
+                }
+            }
+
+            anchor = default;
+            return false;
+        }
+
+        private bool IsWorkingTimeCore(
+            DateTime dateTime,
+            DailyWorkSchedule.DaySliceSet sliceSet,
+            DateTime? firstDayOverrideDate = null,
+            DailyWorkSchedule.DaySliceSet? firstDayOverrideSliceSet = null)
+        {
+            WorkTimeRange[] slices = GetSlicesForDate(dateTime.Date, sliceSet, firstDayOverrideDate, firstDayOverrideSliceSet);
+            TimeSpan tod = dateTime.TimeOfDay;
+            for (int i = 0; i < slices.Length; i++)
+            {
+                if (slices[i].Contains(tod))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private DateTime AddWorkingTimeCore(
+            DateTime startDateTime,
+            TimeSpan duration,
+            DailyWorkSchedule.DaySliceSet sliceSet,
+            bool checkWorkingDayLimits = true,
+            DateTime? firstDayOverrideDate = null,
+            DailyWorkSchedule.DaySliceSet? firstDayOverrideSliceSet = null)
+        {
+            long remainingTicks = duration.Ticks;
+            DateTime currentDay = startDateTime.Date;
+            TimeSpan currentTod = startDateTime.TimeOfDay;
+
+            if (checkWorkingDayLimits)
+            {
+                EnsureCanMoveTimeInDirection(currentDay, direction: 1, sliceSet.MaxSpilloverDays);
+            }
+
+            int emptyDays = 0;
+            while (true)
+            {
+                WorkTimeRange[] slices = GetSlicesForDate(currentDay, sliceSet, firstDayOverrideDate, firstDayOverrideSliceSet);
                 bool hadSliceAfterCursor = false;
 
                 for (int i = 0; i < slices.Length; i++)
@@ -717,14 +1342,17 @@ namespace WorkTimeCalc
                     remainingTicks -= availableTicks;
                 }
 
-                if (hadSliceAfterCursor)
+                if (checkWorkingDayLimits)
                 {
-                    emptyDays = 0;
-                }
-                else
-                {
-                    emptyDays++;
-                    CheckTimeSearchLimit(currentDay, direction: 1, emptyDays);
+                    if (hadSliceAfterCursor)
+                    {
+                        emptyDays = 0;
+                    }
+                    else
+                    {
+                        emptyDays++;
+                        CheckTimeSearchLimit(currentDay, direction: 1, emptyDays, sliceSet.MaxSpilloverDays);
+                    }
                 }
 
                 if (currentDay >= MaxSearchDate)
@@ -737,34 +1365,31 @@ namespace WorkTimeCalc
             }
         }
 
-        /// <inheritdoc />
-        public DateTime SubtractWorkingTime(DateTime endDateTime, TimeSpan duration)
+        private DateTime SubtractWorkingTimeCore(
+            DateTime endDateTime,
+            TimeSpan duration,
+            DailyWorkSchedule.DaySliceSet sliceSet,
+            bool checkWorkingDayLimits = true,
+            DateTime? minBoundaryDateTime = null)
         {
-            if (duration == TimeSpan.Zero)
-            {
-                return endDateTime;
-            }
-
-            if (duration < TimeSpan.Zero)
-            {
-                if (duration == TimeSpan.MinValue)
-                {
-                    throw new ArgumentOutOfRangeException(nameof(duration), duration, "TimeSpan.MinValue は指定できません。");
-                }
-
-                return AddWorkingTime(endDateTime, duration.Negate());
-            }
-
             long remainingTicks = duration.Ticks;
             DateTime currentDay = endDateTime.Date;
             TimeSpan currentTod = endDateTime.TimeOfDay;
 
-            EnsureCanMoveTimeInDirection(currentDay, direction: -1);
+            if (checkWorkingDayLimits)
+            {
+                EnsureCanMoveTimeInDirection(currentDay, direction: -1, sliceSet.MaxSpilloverDays);
+            }
 
             int emptyDays = 0;
             while (true)
             {
-                WorkTimeRange[] slices = GetSlicesForDate(currentDay);
+                if (minBoundaryDateTime.HasValue && currentDay < minBoundaryDateTime.Value.Date)
+                {
+                    throw new InvalidOperationException("指定日時以前に十分な稼働時間が存在しないため、計算を完了できません。");
+                }
+
+                WorkTimeRange[] slices = GetSlicesForDate(currentDay, sliceSet);
                 bool hadSliceBeforeCursor = false;
 
                 for (int i = slices.Length - 1; i >= 0; i--)
@@ -782,20 +1407,29 @@ namespace WorkTimeCalc
                     if (remainingTicks <= availableTicks)
                     {
                         TimeSpan resultOffset = effectiveEnd - TimeSpan.FromTicks(remainingTicks);
-                        return DateTime.SpecifyKind(currentDay.Add(resultOffset), endDateTime.Kind);
+                        DateTime candidate = DateTime.SpecifyKind(currentDay.Add(resultOffset), endDateTime.Kind);
+                        if (minBoundaryDateTime.HasValue && candidate < minBoundaryDateTime.Value)
+                        {
+                            throw new InvalidOperationException("指定日時以前に十分な稼働時間が存在しないため、計算を完了できません。");
+                        }
+
+                        return candidate;
                     }
 
                     remainingTicks -= availableTicks;
                 }
 
-                if (hadSliceBeforeCursor)
+                if (checkWorkingDayLimits)
                 {
-                    emptyDays = 0;
-                }
-                else
-                {
-                    emptyDays++;
-                    CheckTimeSearchLimit(currentDay, direction: -1, emptyDays);
+                    if (hadSliceBeforeCursor)
+                    {
+                        emptyDays = 0;
+                    }
+                    else
+                    {
+                        emptyDays++;
+                        CheckTimeSearchLimit(currentDay, direction: -1, emptyDays, sliceSet.MaxSpilloverDays);
+                    }
                 }
 
                 if (currentDay <= MinSearchDate)
@@ -808,19 +1442,13 @@ namespace WorkTimeCalc
             }
         }
 
-        /// <inheritdoc />
-        public TimeSpan GetWorkingTime(DateTime startDateTime, DateTime endDateTime)
+        private TimeSpan GetWorkingTimeCore(
+            DateTime startDateTime,
+            DateTime endDateTime,
+            DailyWorkSchedule.DaySliceSet sliceSet,
+            DateTime? firstDayOverrideDate = null,
+            DailyWorkSchedule.DaySliceSet? firstDayOverrideSliceSet = null)
         {
-            if (startDateTime == endDateTime)
-            {
-                return TimeSpan.Zero;
-            }
-
-            if (endDateTime < startDateTime)
-            {
-                return GetWorkingTime(endDateTime, startDateTime).Negate();
-            }
-
             DateTime startDay = startDateTime.Date;
             DateTime endDay = endDateTime.Date;
             long totalTicks = 0;
@@ -832,7 +1460,7 @@ namespace WorkTimeCalc
 
                 if (windowEnd > windowStart)
                 {
-                    WorkTimeRange[] slices = GetSlicesForDate(day);
+                    WorkTimeRange[] slices = GetSlicesForDate(day, sliceSet, firstDayOverrideDate, firstDayOverrideSliceSet);
                     for (int i = 0; i < slices.Length; i++)
                     {
                         WorkTimeRange slice = slices[i];
@@ -854,10 +1482,14 @@ namespace WorkTimeCalc
             return new TimeSpan(totalTicks);
         }
 
-        /// <inheritdoc />
-        public DateTime GetNextWorkingTime(DateTime dateTime)
+        private DateTime GetNextWorkingTimeCore(
+            DateTime dateTime,
+            DailyWorkSchedule.DaySliceSet sliceSet,
+            bool checkWorkingDayLimits = true,
+            DateTime? firstDayOverrideDate = null,
+            DailyWorkSchedule.DaySliceSet? firstDayOverrideSliceSet = null)
         {
-            if (IsWorkingTime(dateTime))
+            if (IsWorkingTimeCore(dateTime, sliceSet, firstDayOverrideDate, firstDayOverrideSliceSet))
             {
                 return dateTime;
             }
@@ -865,12 +1497,15 @@ namespace WorkTimeCalc
             DateTime currentDay = dateTime.Date;
             TimeSpan currentTod = dateTime.TimeOfDay;
 
-            EnsureCanMoveTimeInDirection(currentDay, direction: 1);
+            if (checkWorkingDayLimits)
+            {
+                EnsureCanMoveTimeInDirection(currentDay, direction: 1, sliceSet.MaxSpilloverDays);
+            }
 
             int emptyDays = 0;
             while (true)
             {
-                WorkTimeRange[] slices = GetSlicesForDate(currentDay);
+                WorkTimeRange[] slices = GetSlicesForDate(currentDay, sliceSet, firstDayOverrideDate, firstDayOverrideSliceSet);
                 for (int i = 0; i < slices.Length; i++)
                 {
                     WorkTimeRange slice = slices[i];
@@ -880,8 +1515,11 @@ namespace WorkTimeCalc
                     }
                 }
 
-                emptyDays++;
-                CheckTimeSearchLimit(currentDay, direction: 1, emptyDays);
+                if (checkWorkingDayLimits)
+                {
+                    emptyDays++;
+                    CheckTimeSearchLimit(currentDay, direction: 1, emptyDays, sliceSet.MaxSpilloverDays);
+                }
 
                 if (currentDay >= MaxSearchDate)
                 {
@@ -893,10 +1531,14 @@ namespace WorkTimeCalc
             }
         }
 
-        /// <inheritdoc />
-        public DateTime GetPreviousWorkingTime(DateTime dateTime)
+        private DateTime GetPreviousWorkingTimeCore(
+            DateTime dateTime,
+            DailyWorkSchedule.DaySliceSet sliceSet,
+            bool checkWorkingDayLimits = true,
+            DateTime? firstDayOverrideDate = null,
+            DailyWorkSchedule.DaySliceSet? firstDayOverrideSliceSet = null)
         {
-            if (IsWorkingTime(dateTime))
+            if (IsWorkingTimeCore(dateTime, sliceSet, firstDayOverrideDate, firstDayOverrideSliceSet))
             {
                 return dateTime;
             }
@@ -904,12 +1546,15 @@ namespace WorkTimeCalc
             DateTime currentDay = dateTime.Date;
             TimeSpan currentTod = dateTime.TimeOfDay;
 
-            EnsureCanMoveTimeInDirection(currentDay, direction: -1);
+            if (checkWorkingDayLimits)
+            {
+                EnsureCanMoveTimeInDirection(currentDay, direction: -1, sliceSet.MaxSpilloverDays);
+            }
 
             int emptyDays = 0;
             while (true)
             {
-                WorkTimeRange[] slices = GetSlicesForDate(currentDay);
+                WorkTimeRange[] slices = GetSlicesForDate(currentDay, sliceSet, firstDayOverrideDate, firstDayOverrideSliceSet);
                 for (int i = slices.Length - 1; i >= 0; i--)
                 {
                     WorkTimeRange slice = slices[i];
@@ -920,8 +1565,11 @@ namespace WorkTimeCalc
                     }
                 }
 
-                emptyDays++;
-                CheckTimeSearchLimit(currentDay, direction: -1, emptyDays);
+                if (checkWorkingDayLimits)
+                {
+                    emptyDays++;
+                    CheckTimeSearchLimit(currentDay, direction: -1, emptyDays, sliceSet.MaxSpilloverDays);
+                }
 
                 if (currentDay <= MinSearchDate)
                 {
@@ -933,19 +1581,13 @@ namespace WorkTimeCalc
             }
         }
 
-        /// <inheritdoc />
-        public IReadOnlyList<DateTimeInterval> GetWorkingIntervals(DateTime startDateTime, DateTime endDateTime)
+        private IReadOnlyList<DateTimeInterval> GetWorkingIntervalsCore(
+            DateTime startDateTime,
+            DateTime endDateTime,
+            DailyWorkSchedule.DaySliceSet sliceSet,
+            DateTime? firstDayOverrideDate = null,
+            DailyWorkSchedule.DaySliceSet? firstDayOverrideSliceSet = null)
         {
-            if (endDateTime < startDateTime)
-            {
-                throw new ArgumentOutOfRangeException(nameof(endDateTime), endDateTime, "終了日時は開始日時以降である必要があります。");
-            }
-
-            if (endDateTime == startDateTime)
-            {
-                return Array.Empty<DateTimeInterval>();
-            }
-
             DateTime startDay = startDateTime.Date;
             DateTime endDay = endDateTime.Date;
             DateTimeKind kind = startDateTime.Kind;
@@ -958,7 +1600,7 @@ namespace WorkTimeCalc
 
                 if (windowEnd > windowStart)
                 {
-                    WorkTimeRange[] slices = GetSlicesForDate(day);
+                    WorkTimeRange[] slices = GetSlicesForDate(day, sliceSet, firstDayOverrideDate, firstDayOverrideSliceSet);
                     for (int i = 0; i < slices.Length; i++)
                     {
                         WorkTimeRange slice = slices[i];
@@ -992,35 +1634,51 @@ namespace WorkTimeCalc
             return new ReadOnlyCollection<DateTimeInterval>(intervals.ToArray());
         }
 
-        /// <inheritdoc />
-        public IReadOnlyList<DateTimeInterval> GetShiftIntervals(DateTime workingDate)
+        private WorkTimeRange[] GetSlicesForDate(
+            DateTime date,
+            DailyWorkSchedule.DaySliceSet sliceSet,
+            DateTime? firstDayOverrideDate,
+            DailyWorkSchedule.DaySliceSet? firstDayOverrideSliceSet)
         {
-            DateTime target = workingDate.Date;
-            if (!IsWorkingDay(target))
+            if (firstDayOverrideDate.HasValue &&
+                firstDayOverrideSliceSet != null &&
+                date == firstDayOverrideDate.Value)
             {
-                return Array.Empty<DateTimeInterval>();
+                return GetSlicesForDate(date, firstDayOverrideSliceSet);
             }
 
-            IReadOnlyList<WorkTimeRange> ranges = Schedule.EffectiveWorkingRanges;
-            var result = new DateTimeInterval[ranges.Count];
-            DateTimeKind kind = workingDate.Kind;
-
-            for (int i = 0; i < ranges.Count; i++)
-            {
-                WorkTimeRange range = ranges[i];
-                result[i] = new DateTimeInterval(
-                    DateTime.SpecifyKind(target.Add(range.Start), kind),
-                    DateTime.SpecifyKind(target.Add(range.End), kind));
-            }
-
-            return new ReadOnlyCollection<DateTimeInterval>(result);
+            return GetSlicesForDate(date, sliceSet);
         }
 
-        private WorkTimeRange[] GetSlicesForDate(DateTime date)
+        private WorkTimeRange[] GetSlicesForDate(DateTime date, DailyWorkSchedule.DaySliceSet sliceSet)
         {
-            bool isCurrentWorking = IsWorkingDay(date);
-            bool isPreviousWorking = date > MinSearchDate && IsWorkingDay(date.AddDays(-1));
-            return Schedule.GetDaySlices(isPreviousWorking, isCurrentWorking);
+            return sliceSet.GetDaySlices(date, MinSearchDate, IsWorkingDay);
+        }
+
+        private static List<WorkTimeRange>? ParseRangeList(
+            List<TimeRangeDefinition>? items,
+            string nullElementErrorMessage,
+            string paramName)
+        {
+            if (items == null)
+            {
+                return null;
+            }
+
+            var result = new List<WorkTimeRange>(items.Count);
+            foreach (TimeRangeDefinition item in items)
+            {
+                if (item == null)
+                {
+                    throw new ArgumentException(nullElementErrorMessage, paramName);
+                }
+
+                TimeSpan start = TimeFormatHelper.ParseShiftTime(item.Start);
+                TimeSpan end = TimeFormatHelper.ParseShiftTime(item.End);
+                result.Add(WorkTimeRange.FromClock(start, end));
+            }
+
+            return result;
         }
 
         private IEnumerable<DateTime> EnumerateWorkingDays(DateTime start, DateTime end, DateTimeKind kind)
@@ -1080,7 +1738,20 @@ namespace WorkTimeCalc
             }
         }
 
-        private void EnsureCanMoveTimeInDirection(DateTime startDay, int direction)
+        private DateTime GetEffectiveMaxDate(DateTime maxWorkingDate, int maxSpilloverDays)
+        {
+            if (maxSpilloverDays <= 0)
+            {
+                return maxWorkingDate;
+            }
+
+            int remaining = (MaxSearchDate - maxWorkingDate).Days;
+            return maxSpilloverDays >= remaining
+                ? MaxSearchDate
+                : maxWorkingDate.AddDays(maxSpilloverDays);
+        }
+
+        private void EnsureCanMoveTimeInDirection(DateTime startDay, int direction, int maxSpilloverDays)
         {
             if (!_allSevenDaysNonWorking)
             {
@@ -1092,9 +1763,7 @@ namespace WorkTimeCalc
                 throw new InvalidOperationException("すべての曜日が非稼働に設定されており、稼働日の上書きもないため稼働時間を特定できません。");
             }
 
-            DateTime effectiveMax = Schedule.HasOvernightSpillover && _maxWorkingOverrideDate.Value < MaxSearchDate
-                ? _maxWorkingOverrideDate.Value.AddDays(1)
-                : _maxWorkingOverrideDate.Value;
+            DateTime effectiveMax = GetEffectiveMaxDate(_maxWorkingOverrideDate.Value, maxSpilloverDays);
 
             if (direction > 0 && startDay > effectiveMax)
             {
@@ -1129,14 +1798,12 @@ namespace WorkTimeCalc
             }
         }
 
-        private void CheckTimeSearchLimit(DateTime currentDay, int direction, int consecutiveEmptyDays)
+        private void CheckTimeSearchLimit(DateTime currentDay, int direction, int consecutiveEmptyDays, int maxSpilloverDays)
         {
             if (_allSevenDaysNonWorking)
             {
                 DateTime effectiveMax = _maxWorkingOverrideDate.HasValue
-                    ? (Schedule.HasOvernightSpillover && _maxWorkingOverrideDate.Value < MaxSearchDate
-                        ? _maxWorkingOverrideDate.Value.AddDays(1)
-                        : _maxWorkingOverrideDate.Value)
+                    ? GetEffectiveMaxDate(_maxWorkingOverrideDate.Value, maxSpilloverDays)
                     : MinSearchDate;
 
                 if (direction > 0 && (!_maxWorkingOverrideDate.HasValue || currentDay >= effectiveMax))

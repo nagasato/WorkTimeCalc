@@ -30,6 +30,11 @@ namespace WorkTimeCalc.Serialization
         public List<TimeRangeDefinition>? Breaks { get; set; }
 
         /// <summary>
+        /// 1 稼働日あたりの事前定義残業時間帯一覧を取得または設定します（任意）。
+        /// </summary>
+        public List<TimeRangeDefinition>? OvertimePeriods { get; set; }
+
+        /// <summary>
         /// 定休曜日のリストを取得または設定します。
         /// <c>null</c> の場合は土曜日・日曜日が既定値として使用されます。
         /// </summary>

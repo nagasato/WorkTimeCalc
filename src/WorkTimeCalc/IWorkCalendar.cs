@@ -201,5 +201,116 @@ namespace WorkTimeCalc
         /// <param name="workingDate">始業日。</param>
         /// <returns>その始業日に属する実効稼働区間一覧（日跨ぎ分も含む）。</returns>
         IReadOnlyList<DateTimeInterval> GetShiftIntervals(DateTime workingDate);
+
+        /// <summary>
+        /// 指定した日時がカレンダーに事前定義された実効残業時間帯内にあるかどうかを判定します（半開区間 [Start, End)）。
+        /// </summary>
+        /// <param name="dateTime">判定対象の日時。</param>
+        /// <returns>事前定義の残業時間帯内の場合は <c>true</c>。</returns>
+        bool IsOvertime(DateTime dateTime);
+
+        /// <summary>
+        /// 指定した残業ポリシーのもとで、指定日時が実効稼働時間帯内にあるかどうかを判定します（半開区間 [Start, End)）。
+        /// </summary>
+        /// <param name="dateTime">判定対象の日時。</param>
+        /// <param name="overtimePolicy">残業の扱い方を指定するポリシー。</param>
+        /// <returns>実効稼働時間内の場合は <c>true</c>。</returns>
+        bool IsWorkingTime(DateTime dateTime, OvertimePolicy overtimePolicy);
+
+        /// <summary>
+        /// 指定した残業ポリシーのもとで、開始日時から指定した実稼働時間だけ進めた（負数の場合は戻した）完了日時を算出します。
+        /// </summary>
+        /// <param name="startDateTime">開始日時。</param>
+        /// <param name="duration">加算する実稼働時間（負値で逆算、0 で startDateTime を返却）。</param>
+        /// <param name="overtimePolicy">残業の扱い方を指定するポリシー。</param>
+        /// <returns>算出された完了日時。</returns>
+        /// <exception cref="InvalidOperationException"><see cref="OvertimePolicyKind.MaxPerDay"/> 指定時に休憩で終日が覆われ残業上限分の時間を確保できない場合、または稼働日が存在しない場合にスローされます。</exception>
+        DateTime AddWorkingTime(DateTime startDateTime, TimeSpan duration, OvertimePolicy overtimePolicy);
+
+        /// <summary>
+        /// 指定した残業ポリシーのもとで、終了日時から指定した実稼働時間だけ遡った開始日時を算出します。
+        /// </summary>
+        /// <param name="endDateTime">終了日時。</param>
+        /// <param name="duration">減算する実稼働時間（負値で未来方向へ加算、0 で endDateTime を返却）。</param>
+        /// <param name="overtimePolicy">残業の扱い方を指定するポリシー。</param>
+        /// <returns>算出された開始日時。</returns>
+        /// <exception cref="InvalidOperationException"><see cref="OvertimePolicy.Unlimited"/> 指定時に条件を満たす有効な始業開始日時（稼働日の始業時刻以降）が存在しない場合や、稼働日が存在しない場合にスローされます。</exception>
+        DateTime SubtractWorkingTime(DateTime endDateTime, TimeSpan duration, OvertimePolicy overtimePolicy);
+
+        /// <summary>
+        /// 指定した残業ポリシーのもとで、2 つの日時 [startDateTime, endDateTime) の間に含まれる実稼働時間の合計を算出します。
+        /// <paramref name="endDateTime"/> が <paramref name="startDateTime"/> より前の場合は負の <see cref="TimeSpan"/> を返します。
+        /// </summary>
+        /// <param name="startDateTime">開始日時。</param>
+        /// <param name="endDateTime">終了日時。</param>
+        /// <param name="overtimePolicy">残業の扱い方を指定するポリシー。</param>
+        /// <returns>実稼働時間の合計。</returns>
+        TimeSpan GetWorkingTime(DateTime startDateTime, DateTime endDateTime, OvertimePolicy overtimePolicy);
+
+        /// <summary>
+        /// カレンダー事前定義の残業ポリシー（<see cref="OvertimePolicy.CalendarDefined"/>）を用いて、
+        /// 2 つの日時 [startDateTime, endDateTime) の実稼働時間を定時・残業・合計に分解して取得します。
+        /// </summary>
+        /// <param name="startDateTime">開始日時。</param>
+        /// <param name="endDateTime">終了日時。</param>
+        /// <returns>定時・残業・合計を含む <see cref="WorkingTimeBreakdown"/>。</returns>
+        WorkingTimeBreakdown GetWorkingTimeBreakdown(DateTime startDateTime, DateTime endDateTime);
+
+        /// <summary>
+        /// 指定した残業ポリシーのもとで、2 つの日時 [startDateTime, endDateTime) の実稼働時間を定時・残業・合計に分解して取得します。
+        /// </summary>
+        /// <param name="startDateTime">開始日時。</param>
+        /// <param name="endDateTime">終了日時。</param>
+        /// <param name="overtimePolicy">残業の扱い方を指定するポリシー。</param>
+        /// <returns>定時・残業・合計を含む <see cref="WorkingTimeBreakdown"/>。</returns>
+        WorkingTimeBreakdown GetWorkingTimeBreakdown(
+            DateTime startDateTime,
+            DateTime endDateTime,
+            OvertimePolicy overtimePolicy);
+
+        /// <summary>
+        /// 指定した残業ポリシーのもとで、指定日時以降で最も近い稼働開始（既に稼働中の場合はそのまま）の日時を取得します。
+        /// </summary>
+        /// <param name="dateTime">基準日時。</param>
+        /// <param name="overtimePolicy">残業の扱い方を指定するポリシー。</param>
+        /// <returns>稼働開始日時または <paramref name="dateTime"/>。</returns>
+        DateTime GetNextWorkingTime(DateTime dateTime, OvertimePolicy overtimePolicy);
+
+        /// <summary>
+        /// 指定した残業ポリシーのもとで、指定日時以前で最も近い稼働時刻（既に稼働中の場合はそのまま、休憩中・休日の場合は直前の稼働終端）を取得します。
+        /// </summary>
+        /// <param name="dateTime">基準日時。</param>
+        /// <param name="overtimePolicy">残業の扱い方を指定するポリシー。</param>
+        /// <returns>直近の稼働日時または <paramref name="dateTime"/>。</returns>
+        DateTime GetPreviousWorkingTime(DateTime dateTime, OvertimePolicy overtimePolicy);
+
+        /// <summary>
+        /// 指定した残業ポリシーのもとで、指定日時範囲 [startDateTime, endDateTime) に含まれる実効稼働区間の一覧を取得します。
+        /// 日付境界で連続する区間は結合されます。
+        /// </summary>
+        /// <param name="startDateTime">開始日時（含む）。</param>
+        /// <param name="endDateTime">終了日時（含まない）。</param>
+        /// <param name="overtimePolicy">残業の扱い方を指定するポリシー。</param>
+        /// <returns>実効稼働区間の一覧。</returns>
+        IReadOnlyList<DateTimeInterval> GetWorkingIntervals(
+            DateTime startDateTime,
+            DateTime endDateTime,
+            OvertimePolicy overtimePolicy);
+
+        /// <summary>
+        /// 指定した残業ポリシーのもとで、指定稼働日を始業日とする実効稼働時間帯の一覧を取得します。
+        /// 非稼働日の場合は空のリストを返します。<see cref="OvertimePolicy.Unlimited"/> を指定した場合は <see cref="ArgumentException"/> がスローされます。
+        /// </summary>
+        /// <param name="workingDate">始業日。</param>
+        /// <param name="overtimePolicy">残業の扱い方を指定するポリシー。</param>
+        /// <returns>その始業日に属する実効稼働区間一覧（日跨ぎ分も含む）。</returns>
+        IReadOnlyList<DateTimeInterval> GetShiftIntervals(DateTime workingDate, OvertimePolicy overtimePolicy);
+
+#if NET6_0_OR_GREATER
+        /// <summary>
+        /// 指定した残業ポリシーのもとで、指定稼働日（<see cref="DateOnly"/>）を始業日とする実効稼働時間帯の一覧を取得します。
+        /// </summary>
+        IReadOnlyList<DateTimeInterval> GetShiftIntervals(DateOnly workingDate, OvertimePolicy overtimePolicy);
+#endif
     }
 }

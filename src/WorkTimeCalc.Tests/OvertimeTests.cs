@@ -702,5 +702,24 @@ namespace WorkTimeCalc.Tests
             Assert.Equal(new DateTimeInterval(new DateTime(2026, 5, 11, 0, 0, 0), new DateTime(2026, 5, 12, 0, 0, 0)), intervals[0]);
             Assert.Equal(new DateTimeInterval(new DateTime(2026, 5, 12, 0, 0, 0), new DateTime(2026, 5, 13, 0, 0, 0)), intervals[1]);
         }
+
+        [Fact]
+        public void OvertimePolicy_MaxPerDay_ManyDaysSpillover_BuildsLinearlyAndCalculatesAccurately()
+        {
+            // 指摘: 定時 00:00-24:00・休憩 00:00-23:59:59 に MaxPerDay(24h) を指定しても
+            // BuildSliceSet が O(M + D) の線形で完了し、多日跨ぎ計算が正確に動作すること
+            WorkCalendar cal = WorkCalendar.CreateBuilder()
+                .WithWorkingHours(TimeSpan.Zero, TimeSpan.FromHours(24))
+                .AddBreak(TimeSpan.Zero, new TimeSpan(23, 59, 59))
+                .WithNonWorkingDaysOfWeek()
+                .WithoutHolidays()
+                .Build();
+
+            OvertimePolicy max24h = OvertimePolicy.MaxPerDay(TimeSpan.FromHours(24));
+            var start = new DateTime(2026, 5, 11, 23, 59, 59);
+
+            Assert.Equal(new DateTime(2026, 5, 12, 0, 0, 0), cal.AddWorkingTime(start, TimeSpan.FromSeconds(1), max24h));
+            Assert.Equal(new DateTime(2026, 5, 13, 0, 0, 0), cal.AddWorkingTime(start, TimeSpan.FromSeconds(2), max24h));
+        }
     }
 }

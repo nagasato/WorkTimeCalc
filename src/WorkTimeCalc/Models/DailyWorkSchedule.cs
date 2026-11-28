@@ -364,7 +364,7 @@ namespace WorkTimeCalc.Models
 
         internal sealed class DaySliceSet
         {
-            private readonly List<RawSpan>[]? _slicesByDayOffset;
+            private readonly List<RawSpan>?[]? _slicesByDayOffset;
 
             public static DaySliceSet Empty { get; } = new DaySliceSet(
                 Array.Empty<RawSpan>(),
@@ -384,7 +384,7 @@ namespace WorkTimeCalc.Models
                 WorkTimeRange[] bothDaysSlices,
                 IReadOnlyList<WorkTimeRange> effectiveRanges,
                 int maxSpilloverDays,
-                List<RawSpan>[]? slicesByDayOffset)
+                List<RawSpan>?[]? slicesByDayOffset)
             {
                 EffectiveSpans = effectiveSpans;
                 NeitherSlices = neitherSlices;
@@ -437,8 +437,8 @@ namespace WorkTimeCalc.Models
 
                 for (int offset = 0; offset <= limit; offset++)
                 {
-                    List<RawSpan> daySlices = _slicesByDayOffset[offset];
-                    if (daySlices.Count == 0)
+                    List<RawSpan>? daySlices = _slicesByDayOffset[offset];
+                    if (daySlices == null || daySlices.Count == 0)
                     {
                         continue;
                     }
@@ -508,12 +508,41 @@ namespace WorkTimeCalc.Models
                     slicesByDayOffset: null);
             }
 
-            var slicesByDayOffset = new List<RawSpan>[maxSpilloverDays + 1];
+            long oneDayTicks = TimeFormatHelper.OneDay.Ticks;
+            var slicesByDayOffset = new List<RawSpan>?[maxSpilloverDays + 1];
+
+            foreach (RawSpan span in effectiveSpans)
+            {
+                int startDay = (int)(span.Start.Ticks / oneDayTicks);
+                int endDay = (int)((span.End.Ticks - 1) / oneDayTicks);
+
+                for (int d = startDay; d <= endDay; d++)
+                {
+                    long dayStartTicks = (long)d * oneDayTicks;
+                    long dayEndTicks = dayStartTicks + oneDayTicks;
+                    long clippedStart = span.Start.Ticks > dayStartTicks ? span.Start.Ticks : dayStartTicks;
+                    long clippedEnd = span.End.Ticks < dayEndTicks ? span.End.Ticks : dayEndTicks;
+
+                    List<RawSpan>? bucket = slicesByDayOffset[d];
+                    if (bucket == null)
+                    {
+                        bucket = new List<RawSpan>();
+                        slicesByDayOffset[d] = bucket;
+                    }
+
+                    bucket.Add(new RawSpan(
+                        TimeSpan.FromTicks(clippedStart - dayStartTicks),
+                        TimeSpan.FromTicks(clippedEnd - dayStartTicks)));
+                }
+            }
+
             for (int d = 0; d <= maxSpilloverDays; d++)
             {
-                TimeSpan windowStart = TimeSpan.FromTicks(d * TimeFormatHelper.OneDay.Ticks);
-                TimeSpan windowEnd = windowStart + TimeFormatHelper.OneDay;
-                slicesByDayOffset[d] = MergeSpans(ClipAndShift(effectiveSpans, windowStart, windowEnd, -windowStart));
+                List<RawSpan>? bucket = slicesByDayOffset[d];
+                if (bucket != null && bucket.Count > 1)
+                {
+                    slicesByDayOffset[d] = MergeSpans(bucket);
+                }
             }
 
             return new DaySliceSet(
